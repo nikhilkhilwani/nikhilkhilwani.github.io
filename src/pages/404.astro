@@ -1,0 +1,44 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import { availableTools, toolPath } from '../data/tools';
+---
+
+<BaseLayout title="Not found — Nikhil Khilwani" description="That page doesn't exist.">
+  <div class="shell nf">
+    <p class="eyebrow">404</p>
+    <h1>That page doesn't exist</h1>
+    <p class="lede">
+      The link may be out of date, or the page may not be built yet. Here's what is live:
+    </p>
+    <ul class="nf__list">
+      {
+        availableTools.map((t) => (
+          <li>
+            <a href={toolPath(t.slug)}>
+              <Icon name={t.icon} size={16} /> {t.title}
+            </a>
+          </li>
+        ))
+      }
+    </ul>
+    <a class="btn" href="/">Back home</a>
+  </div>
+</BaseLayout>
+
+<style>
+  .nf { padding-block: clamp(48px, 10vw, 110px); max-width: 46ch; }
+  .nf h1 { font-size: clamp(1.9rem, 6vw, 3rem); margin: 0.4rem 0 1rem; }
+  .nf__list { list-style: none; padding: 0; margin: 1.5rem 0 2rem; }
+  .nf__list a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    min-height: 44px;
+    text-decoration: none;
+    color: var(--ink-dim);
+    font-size: 0.92rem;
+  }
+  .nf__list a:hover { color: var(--accent); }
+  .nf__list :global(svg) { color: var(--accent); opacity: 0.8; }
+</style>

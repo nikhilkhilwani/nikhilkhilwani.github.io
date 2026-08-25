@@ -1,0 +1,67 @@
+---
+// The drifting auras + masked grid from the landing page, extracted so every
+// page shares one background. Purely decorative, so it is aria-hidden and
+// pointer-events:none.
+---
+
+<div class="aura" aria-hidden="true"><span></span><span></span><span></span></div>
+<div class="mesh" aria-hidden="true"></div>
+
+<style>
+  .aura {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    overflow: hidden;
+  }
+  .aura span {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(90px);
+    opacity: 0.35;
+    animation: drift 22s ease-in-out infinite alternate;
+  }
+  .aura span:nth-child(1) {
+    width: 52vmax; height: 52vmax; left: -14vmax; top: -18vmax;
+    background: radial-gradient(circle, #1d4e63, transparent 70%);
+  }
+  .aura span:nth-child(2) {
+    width: 44vmax; height: 44vmax; right: -12vmax; top: 8vmax;
+    background: radial-gradient(circle, #3b2c63, transparent 70%);
+    animation-delay: -7s;
+  }
+  .aura span:nth-child(3) {
+    width: 38vmax; height: 38vmax; left: 22vmax; bottom: -16vmax;
+    background: radial-gradient(circle, #1c5346, transparent 70%);
+    animation-delay: -13s;
+  }
+  @keyframes drift {
+    from { transform: translate3d(0, 0, 0) scale(1); }
+    to { transform: translate3d(4vmax, -3vmax, 0) scale(1.12); }
+  }
+
+  .mesh {
+    position: fixed;
+    inset: 0;
+    z-index: 0;
+    pointer-events: none;
+    opacity: 0.5;
+    background-image:
+      linear-gradient(var(--line) 1px, transparent 1px),
+      linear-gradient(90deg, var(--line) 1px, transparent 1px);
+    background-size: 72px 72px;
+    -webkit-mask-image: radial-gradient(ellipse 80% 65% at 50% 30%, #000 20%, transparent 78%);
+    mask-image: radial-gradient(ellipse 80% 65% at 50% 30%, #000 20%, transparent 78%);
+  }
+
+  /* 90px blur across three 50vmax boxes is real work for a low-end phone GPU. */
+  @media (max-width: 640px) {
+    .aura span { filter: blur(60px); opacity: 0.42; }
+    .mesh { background-size: 48px 48px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .aura span { animation: none; }
+  }
+</style>

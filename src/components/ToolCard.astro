@@ -1,0 +1,102 @@
+---
+import Icon from './Icon.astro';
+import type { ToolMeta } from '../data/tools';
+import { toolPath } from '../data/tools';
+
+interface Props { tool: ToolMeta }
+const { tool } = Astro.props;
+
+const soon = tool.status === 'coming-soon';
+// A coming-soon card is a <div>, not a disabled <a> — nothing to tab to, and no
+// dead link for a crawler to follow.
+const Tag = soon ? 'div' : 'a';
+---
+
+<Tag class:list={['card', { 'card--soon': soon }]} href={soon ? undefined : toolPath(tool.slug)}>
+  <span class="card__icon"><Icon name={tool.icon} size={20} /></span>
+  <h3 class="card__title">
+    {tool.title}
+    {soon && <span class="card__tag">Soon</span>}
+  </h3>
+  <p class="card__desc">{tool.description}</p>
+  {!soon && <span class="card__go">Open <Icon name="arrow" size={14} /></span>}
+</Tag>
+
+<style>
+  .card {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: clamp(16px, 2.4vw, 22px);
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01));
+    text-decoration: none;
+    color: inherit;
+    transition: border-color 0.2s, transform 0.2s, background 0.2s;
+  }
+  a.card:hover {
+    border-color: rgba(110, 231, 215, 0.45);
+    transform: translateY(-2px);
+  }
+  @media (prefers-reduced-motion: reduce) {
+    a.card:hover { transform: none; }
+  }
+
+  .card--soon { opacity: 0.55; }
+
+  .card__icon {
+    width: 38px; height: 38px;
+    display: grid; place-items: center;
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    color: var(--accent);
+    background: rgba(110, 231, 215, 0.05);
+  }
+
+  .card__title {
+    font-family: var(--sans);
+    font-size: 1rem;
+    font-weight: 400;
+    letter-spacing: 0;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    flex-wrap: wrap;
+    margin-top: 0.35rem;
+  }
+  .card__tag {
+    font-size: 0.62rem;
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border: 1px solid var(--line-strong);
+    border-radius: 999px;
+    padding: 0.15em 0.5em;
+  }
+
+  .card__desc {
+    margin: 0;
+    font-size: 0.87rem;
+    line-height: 1.55;
+    color: var(--ink-dim);
+    flex: 1 1 auto;
+  }
+
+  .card__go {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.8rem;
+    color: var(--accent);
+    opacity: 0;
+    transform: translateX(-4px);
+    transition: opacity 0.2s, transform 0.2s;
+  }
+  a.card:hover .card__go,
+  a.card:focus-visible .card__go { opacity: 1; transform: none; }
+  /* Touch devices never hover, so don't hide the affordance there. */
+  @media (hover: none) {
+    .card__go { opacity: 1; transform: none; }
+  }
+</style>

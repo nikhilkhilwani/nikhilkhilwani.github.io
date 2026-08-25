@@ -1,0 +1,146 @@
+---
+import BaseLayout from './BaseLayout.astro';
+import Icon from '../components/Icon.astro';
+import { getTool, availableTools, toolPath } from '../data/tools';
+
+interface Props {
+  slug: string;
+}
+const { slug } = Astro.props;
+
+const tool = getTool(slug);
+if (!tool) throw new Error(`ToolLayout: unknown tool slug "${slug}"`);
+
+// Title format is deliberate: the tool name leads, so it reads well in a tab
+// strip and in search results.
+const title = `${tool.title} — Nikhil Khilwani`;
+---
+
+<BaseLayout title={title} description={tool.description}>
+  <div class="shell">
+    <nav class="crumbs" aria-label="Breadcrumb">
+      <a href="/tools">Tools</a>
+      <span aria-hidden="true">/</span>
+      <span aria-current="page">{tool.title}</span>
+    </nav>
+
+    <div class="head">
+      <span class="head__icon"><Icon name={tool.icon} size={22} /></span>
+      <div>
+        <h1>{tool.title}</h1>
+        <p class="lede">{tool.description}</p>
+      </div>
+    </div>
+
+    <div class="cols">
+      <div class="work"><slot /></div>
+
+      <aside class="switch" aria-label="Other tools">
+        <p class="eyebrow">Other tools</p>
+        <ul>
+          {
+            availableTools
+              .filter((t) => t.slug !== slug)
+              .map((t) => (
+                <li>
+                  <a href={toolPath(t.slug)}>
+                    <Icon name={t.icon} size={16} />
+                    {t.title}
+                  </a>
+                </li>
+              ))
+          }
+        </ul>
+        <a class="switch__all" href="/tools">
+          All tools <Icon name="arrow" size={14} />
+        </a>
+      </aside>
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .crumbs {
+    display: flex;
+    gap: 0.5rem;
+    align-items: center;
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    padding-top: clamp(20px, 4vw, 32px);
+  }
+  .crumbs a { color: var(--ink-dim); text-decoration: none; }
+  .crumbs a:hover { color: var(--accent); }
+
+  .head {
+    display: flex;
+    gap: 1rem;
+    align-items: flex-start;
+    padding: clamp(18px, 3vw, 26px) 0 clamp(24px, 4vw, 36px);
+  }
+  .head__icon {
+    flex: 0 0 auto;
+    width: 44px; height: 44px;
+    display: grid; place-items: center;
+    border: 1px solid var(--line-strong);
+    border-radius: 12px;
+    color: var(--accent);
+    background: rgba(110, 231, 215, 0.06);
+  }
+  .head h1 { font-size: clamp(1.75rem, 5vw, 2.6rem); }
+  .head .lede { margin-top: 0.55rem; font-size: 0.95rem; }
+
+  .cols {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 232px;
+    gap: clamp(24px, 4vw, 48px);
+    align-items: start;
+  }
+  @media (max-width: 900px) {
+    .cols { grid-template-columns: minmax(0, 1fr); }
+    .switch { order: 2; }
+  }
+
+  .work { min-width: 0; }
+
+  .switch {
+    position: sticky;
+    top: 24px;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    padding: 1rem;
+    background: rgba(255, 255, 255, 0.02);
+  }
+  @media (max-width: 900px) {
+    .switch { position: static; }
+  }
+  .switch ul { list-style: none; margin: 0.7rem 0 0; padding: 0; }
+  .switch li + li { margin-top: 0.15rem; }
+  .switch a {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-height: 44px;
+    padding: 0 0.5rem;
+    border-radius: var(--r-sm);
+    text-decoration: none;
+    font-size: 0.88rem;
+    color: var(--ink-dim);
+    transition: background 0.18s, color 0.18s;
+  }
+  .switch a:hover { background: rgba(255, 255, 255, 0.045); color: var(--ink); }
+  .switch a :global(svg) { color: var(--accent); opacity: 0.85; flex: 0 0 auto; }
+  .switch__all {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    margin-top: 0.8rem;
+    padding-top: 0.8rem;
+    border-top: 1px solid var(--line);
+    width: 100%;
+    min-height: 40px;
+    font-size: 0.8rem;
+    color: var(--ink-faint);
+    text-decoration: none;
+  }
+  .switch__all:hover { color: var(--accent); }
+</style>

@@ -1,0 +1,295 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Icon from '../../components/Icon.astro';
+import { palettes, MOODS, FAMILIES } from '../../data/palettes';
+
+// Every card is rendered server-side and filtered by toggling [hidden] — the
+// markup is crawlable, and filtering costs no network round trip.
+---
+
+<ToolLayout slug="palette-collection">
+  <div class="pl">
+    <section class="panel pl__filters">
+      <div class="pl__search field">
+        <label for="pl-q">Search</label>
+        <input id="pl-q" type="text" placeholder="teal, pastel, ochre…" autocomplete="off" spellcheck="false" />
+      </div>
+
+      <div class="pl__group" role="group" aria-label="Mood">
+        <span class="pl__legend">Mood</span>
+        <div class="pl__pills">
+          <button class="pill" type="button" data-filter="mood" data-value="all" aria-pressed="true">All</button>
+          {
+            MOODS.map((m) => (
+              <button class="pill" type="button" data-filter="mood" data-value={m} aria-pressed="false">
+                {m}
+              </button>
+            ))
+          }
+        </div>
+      </div>
+
+      <div class="pl__group" role="group" aria-label="Hue">
+        <span class="pl__legend">Hue</span>
+        <div class="pl__pills">
+          <button class="pill" type="button" data-filter="family" data-value="all" aria-pressed="true">All</button>
+          {
+            FAMILIES.map((f) => (
+              <button class="pill" type="button" data-filter="family" data-value={f} aria-pressed="false">
+                {f}
+              </button>
+            ))
+          }
+        </div>
+      </div>
+
+      <div class="pl__group" role="group" aria-label="Tone">
+        <span class="pl__legend">Tone</span>
+        <div class="pl__pills">
+          <button class="pill" type="button" data-filter="tone" data-value="all" aria-pressed="true">All</button>
+          <button class="pill" type="button" data-filter="tone" data-value="light" aria-pressed="false">Light</button>
+          <button class="pill" type="button" data-filter="tone" data-value="dark" aria-pressed="false">Dark</button>
+        </div>
+      </div>
+
+      <p class="pl__count" role="status" aria-live="polite">
+        <span id="pl-count">{palettes.length}</span> of {palettes.length} palettes
+      </p>
+    </section>
+
+    <div class="pl__grid" id="pl-grid">
+      {
+        palettes.map((p) => (
+          <article
+            class="pal"
+            data-mood={p.mood}
+            data-family={p.family}
+            data-tone={p.tone}
+            data-name={p.name.toLowerCase()}
+          >
+            <div class="pal__strip">
+              {
+                p.colors.map((hex) => (
+                  <button
+                    class="pal__sw"
+                    type="button"
+                    style={`--sw:${hex}`}
+                    data-copy={hex}
+                    data-copy-label="Copied"
+                    title={`Copy ${hex}`}
+                  >
+                    <span class="pal__hex mono">{hex}</span>
+                  </button>
+                ))
+              }
+            </div>
+            <div class="pal__foot">
+              <div>
+                <h3 class="pal__name">{p.name}</h3>
+                <p class="pal__tags">{p.mood} · {p.scheme} · {p.tone}</p>
+              </div>
+              <button class="btn btn--sm pal__css" type="button" data-css={p.colors.join(',')} data-pal={p.name}>
+                <Icon name="copy" size={13} /> CSS
+              </button>
+            </div>
+          </article>
+        ))
+      }
+    </div>
+
+    <p class="pl__empty" id="pl-empty" hidden>
+      Nothing matches those filters. <button class="pl__reset" id="pl-reset" type="button">Reset</button>
+    </p>
+  </div>
+</ToolLayout>
+
+<style>
+  .pl { display: grid; gap: clamp(16px, 2.5vw, 24px); }
+
+  .pl__filters { display: grid; gap: 1rem; }
+  .pl__search { max-width: 24rem; }
+  .pl__group { display: grid; gap: 0.5rem; }
+  .pl__legend {
+    font-size: 0.72rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .pl__pills { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .pill {
+    font: inherit;
+    font-size: 0.8rem;
+    text-transform: capitalize;
+    min-height: 36px;
+    padding: 0 0.8rem;
+    border-radius: 999px;
+    border: 1px solid var(--line-strong);
+    background: transparent;
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: border-color 0.18s, color 0.18s, background 0.18s;
+  }
+  .pill:hover { color: var(--ink); border-color: var(--ink-faint); }
+  .pill[aria-pressed='true'] {
+    background: var(--accent);
+    border-color: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 500;
+  }
+  .pl__count { margin: 0; font-size: 0.78rem; color: var(--ink-faint); }
+
+  .pl__grid {
+    display: grid;
+    gap: clamp(12px, 1.8vw, 18px);
+    grid-template-columns: repeat(auto-fill, minmax(min(100%, 268px), 1fr));
+  }
+
+  .pal {
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    overflow: hidden;
+    background: rgba(255, 255, 255, 0.02);
+    transition: border-color 0.2s;
+  }
+  .pal:hover { border-color: var(--line-strong); }
+  .pal[hidden] { display: none; }
+
+  .pal__strip { display: flex; height: 96px; }
+  .pal__sw {
+    flex: 1 1 0;
+    border: 0;
+    padding: 0;
+    background: var(--sw);
+    cursor: pointer;
+    position: relative;
+    transition: flex-grow 0.22s;
+  }
+  .pal__sw:hover { flex-grow: 1.9; }
+  @media (prefers-reduced-motion: reduce) {
+    .pal__sw { transition: none; }
+  }
+  .pal__hex {
+    position: absolute;
+    inset-inline: 0;
+    bottom: 6px;
+    font-size: 0.6rem;
+    opacity: 0;
+    color: #000;
+    mix-blend-mode: luminosity;
+    transition: opacity 0.18s;
+    pointer-events: none;
+  }
+  .pal__sw:hover .pal__hex,
+  .pal__sw:focus-visible .pal__hex { opacity: 0.85; }
+  /* No hover on touch, so always show the values there. */
+  @media (hover: none) {
+    .pal__hex { opacity: 0.8; }
+  }
+
+  .pal__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.6rem;
+    padding: 0.7rem 0.75rem;
+    border-top: 1px solid var(--line);
+  }
+  .pal__name {
+    font-family: var(--sans);
+    font-size: 0.9rem;
+    font-weight: 400;
+    letter-spacing: 0;
+  }
+  .pal__tags {
+    margin: 0.15rem 0 0;
+    font-size: 0.68rem;
+    text-transform: capitalize;
+    color: var(--ink-faint);
+  }
+  .pal__css { flex: 0 0 auto; }
+
+  .pl__empty { text-align: center; color: var(--ink-dim); font-size: 0.9rem; padding: 2rem 0; }
+  .pl__reset {
+    font: inherit;
+    background: none;
+    border: 0;
+    border-bottom: 1px solid var(--accent);
+    color: var(--accent);
+    cursor: pointer;
+    padding: 0;
+  }
+</style>
+
+<script>
+  import { bindCopy, copy } from '../../lib/ui/clipboard';
+
+  const grid = document.getElementById('pl-grid')!;
+  const cards = Array.from(grid.querySelectorAll<HTMLElement>('.pal'));
+  const countEl = document.getElementById('pl-count')!;
+  const empty = document.getElementById('pl-empty')!;
+  const search = document.getElementById('pl-q') as HTMLInputElement;
+
+  const active = { mood: 'all', family: 'all', tone: 'all' };
+  let query = '';
+
+  function apply() {
+    let shown = 0;
+    for (const card of cards) {
+      const d = card.dataset;
+      const hit =
+        (active.mood === 'all' || d.mood === active.mood) &&
+        (active.family === 'all' || d.family === active.family) &&
+        (active.tone === 'all' || d.tone === active.tone) &&
+        (query === '' ||
+          `${d.name} ${d.mood} ${d.family} ${d.tone}`.includes(query));
+      card.hidden = !hit;
+      if (hit) shown++;
+    }
+    countEl.textContent = String(shown);
+    empty.hidden = shown > 0;
+  }
+
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-filter]')) {
+    btn.addEventListener('click', () => {
+      const group = btn.dataset.filter as keyof typeof active;
+      active[group] = btn.dataset.value!;
+      for (const sib of document.querySelectorAll<HTMLButtonElement>(`[data-filter="${group}"]`)) {
+        sib.setAttribute('aria-pressed', String(sib === btn));
+      }
+      apply();
+    });
+  }
+
+  let debounce: number | undefined;
+  search.addEventListener('input', () => {
+    window.clearTimeout(debounce);
+    debounce = window.setTimeout(() => {
+      query = search.value.trim().toLowerCase();
+      apply();
+    }, 120);
+  });
+
+  document.getElementById('pl-reset')!.addEventListener('click', () => {
+    active.mood = active.family = active.tone = 'all';
+    query = '';
+    search.value = '';
+    for (const b of document.querySelectorAll<HTMLButtonElement>('[data-filter]')) {
+      b.setAttribute('aria-pressed', String(b.dataset.value === 'all'));
+    }
+    apply();
+  });
+
+  // Whole-palette copy, as CSS custom properties ready to paste into :root.
+  for (const btn of document.querySelectorAll<HTMLButtonElement>('[data-css]')) {
+    btn.addEventListener('click', () => {
+      const hexes = btn.dataset.css!.split(',');
+      const slug = btn.dataset.pal!.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+      const css = `/* ${btn.dataset.pal} */\n:root {\n${hexes
+        .map((hex, i) => `  --${slug}-${i + 1}: ${hex};`)
+        .join('\n')}\n}`;
+      void copy(css, 'Palette copied as CSS');
+    });
+  }
+
+  bindCopy();
+</script>

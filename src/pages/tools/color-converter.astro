@@ -1,0 +1,269 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Icon from '../../components/Icon.astro';
+
+const FORMATS = [
+  { key: 'hex', label: 'HEX' },
+  { key: 'rgb', label: 'RGB' },
+  { key: 'hsl', label: 'HSL' },
+  { key: 'hsv', label: 'HSV' },
+  { key: 'cmyk', label: 'CMYK' },
+  { key: 'oklch', label: 'OKLCH' },
+  { key: 'name', label: 'Nearest name' },
+];
+---
+
+<ToolLayout slug="color-converter">
+  <div class="cc">
+    <section class="panel">
+      <div class="field">
+        <label for="cc-text">Color — hex, rgb(), hsl(), hsv(), cmyk(), oklch(), or a name</label>
+        <div class="cc__row">
+          <input
+            id="cc-text"
+            type="text"
+            value="#6ee7d7"
+            spellcheck="false"
+            autocomplete="off"
+            autocapitalize="off"
+            aria-describedby="cc-error"
+          />
+          <input id="cc-picker" type="color" value="#6ee7d7" aria-label="Pick a color" />
+          <button id="cc-random" class="btn btn--sm" type="button">
+            <Icon name="shuffle" size={14} /> Random
+          </button>
+        </div>
+        <p id="cc-error" class="cc__err" role="status" aria-live="polite"></p>
+      </div>
+
+      <div class="cc__sliders">
+        {
+          [
+            { id: 'h', label: 'Hue', max: 360, unit: '°' },
+            { id: 's', label: 'Saturation', max: 100, unit: '%' },
+            { id: 'l', label: 'Lightness', max: 100, unit: '%' },
+          ].map((s) => (
+            <div class="cc__slider">
+              <label for={`cc-${s.id}`}>
+                {s.label} <output id={`cc-${s.id}-out`} data-unit={s.unit}>0{s.unit}</output>
+              </label>
+              <input id={`cc-${s.id}`} type="range" min="0" max={s.max} step="1" value="0" />
+            </div>
+          ))
+        }
+      </div>
+    </section>
+
+    <section class="cc__preview panel" aria-label="Preview">
+      <div id="cc-swatch" class="cc__swatch">
+        <span id="cc-swatch-hex" class="mono">#6ee7d7</span>
+      </div>
+      <p id="cc-gamut" class="cc__gamut" hidden>
+        Outside the sRGB gamut — the swatch is clipped to the nearest displayable color.
+      </p>
+    </section>
+
+    <section class="cc__out" aria-label="Converted values">
+      {
+        FORMATS.map((f) => (
+          <button class="copyrow" type="button" data-copy="" data-fmt={f.key} data-copy-label="Copied">
+            <span class="copyrow__label">{f.label}</span>
+            <span class="copyrow__val" data-val={f.key}>—</span>
+            <Icon name="copy" size={15} />
+          </button>
+        ))
+      }
+    </section>
+  </div>
+</ToolLayout>
+
+<style>
+  .cc { display: grid; gap: clamp(14px, 2vw, 20px); }
+  @media (min-width: 720px) {
+    .cc { grid-template-columns: minmax(0, 1.15fr) minmax(0, 1fr); }
+    .cc > .panel:first-child { grid-column: 1 / -1; }
+  }
+
+  .cc__row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .cc__row input[type='text'] { flex: 1 1 12rem; min-width: 0; font-family: var(--mono); }
+  .cc__row .btn { flex: 0 0 auto; }
+
+  .cc__err {
+    margin: 0.5rem 0 0;
+    min-height: 1.1em;
+    font-size: 0.8rem;
+    color: var(--bad);
+  }
+
+  .cc__sliders {
+    display: grid;
+    gap: 0.35rem 1.25rem;
+    margin-top: 1.1rem;
+  }
+  @media (min-width: 560px) {
+    .cc__sliders { grid-template-columns: repeat(3, 1fr); }
+  }
+  .cc__slider label {
+    display: flex;
+    justify-content: space-between;
+    font-size: 0.72rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .cc__slider output { font-family: var(--mono); color: var(--ink-dim); }
+
+  .cc__preview { display: flex; flex-direction: column; gap: 0.6rem; }
+  .cc__swatch {
+    flex: 1 1 auto;
+    min-height: 148px;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--line-strong);
+    background: #6ee7d7;
+    display: grid;
+    place-items: center;
+    transition: background 0.15s linear;
+  }
+  .cc__swatch span { font-size: 1.05rem; letter-spacing: 0.04em; }
+  .cc__gamut { margin: 0; font-size: 0.76rem; color: var(--warn); line-height: 1.45; }
+
+  .cc__out { display: grid; gap: 0.5rem; align-content: start; }
+  .cc__out .copyrow {
+    font: inherit;
+    width: 100%;
+    cursor: pointer;
+    text-align: left;
+    transition: border-color 0.18s;
+  }
+  .cc__out .copyrow:hover { border-color: var(--accent); }
+  .cc__out .copyrow :global(svg) { color: var(--ink-faint); flex: 0 0 auto; }
+  .cc__out .copyrow:hover :global(svg) { color: var(--accent); }
+</style>
+
+<script>
+  import {
+    parseColor, hslToRgb, rgbToHsl, rgbToHex, rgbToOklch, isOutOfSrgbGamut,
+    nearestNamed, fmt, type RGB,
+  } from '../../lib/color/convert';
+  import { bindCopy } from '../../lib/ui/clipboard';
+  import { bestTextOn } from '../../lib/contrast/wcag';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const text = $<HTMLInputElement>('cc-text');
+  const picker = $<HTMLInputElement>('cc-picker');
+  const random = $<HTMLButtonElement>('cc-random');
+  const err = $<HTMLParagraphElement>('cc-error');
+  const swatch = $<HTMLDivElement>('cc-swatch');
+  const swatchHex = $<HTMLSpanElement>('cc-swatch-hex');
+  const gamut = $<HTMLParagraphElement>('cc-gamut');
+
+  const sliders = {
+    h: $<HTMLInputElement>('cc-h'),
+    s: $<HTMLInputElement>('cc-s'),
+    l: $<HTMLInputElement>('cc-l'),
+  };
+  const outs = {
+    h: $<HTMLOutputElement>('cc-h-out'),
+    s: $<HTMLOutputElement>('cc-s-out'),
+    l: $<HTMLOutputElement>('cc-l-out'),
+  };
+
+  type Source = 'text' | 'picker' | 'slider' | 'init';
+
+  function render(rgb: RGB, from: Source) {
+    const hex = rgbToHex(rgb);
+    const hsl = rgbToHsl(rgb);
+
+    // Never write back into the control being typed in — it would fight the caret.
+    if (from !== 'text') text.value = hex;
+    if (from !== 'picker') picker.value = hex;
+    if (from !== 'slider') {
+      sliders.h.value = String(Math.round(hsl.h));
+      sliders.s.value = String(Math.round(hsl.s));
+      sliders.l.value = String(Math.round(hsl.l));
+    }
+    outs.h.textContent = `${Math.round(hsl.h)}°`;
+    outs.s.textContent = `${Math.round(hsl.s)}%`;
+    outs.l.textContent = `${Math.round(hsl.l)}%`;
+
+    swatch.style.background = hex;
+    swatchHex.textContent = hex;
+    swatchHex.style.color = rgbToHex(bestTextOn(rgb));
+
+    gamut.hidden = !isOutOfSrgbGamut(rgbToOklch(rgb));
+
+    const named = nearestNamed(rgb);
+    const values: Record<string, string> = {
+      hex,
+      rgb: fmt.rgb(rgb),
+      hsl: fmt.hsl(rgb),
+      hsv: fmt.hsv(rgb),
+      cmyk: fmt.cmyk(rgb),
+      oklch: fmt.oklch(rgb),
+      name: named.exact ? named.name : `~ ${named.name}`,
+    };
+
+    for (const [key, value] of Object.entries(values)) {
+      const cell = document.querySelector<HTMLElement>(`[data-val="${key}"]`);
+      if (cell) cell.textContent = value;
+      const row = document.querySelector<HTMLElement>(`[data-fmt="${key}"]`);
+      // The nearest-name row copies the bare name, without the ~ marker.
+      if (row) row.dataset.copy = key === 'name' ? named.name : value;
+    }
+
+    // Shareable URL, without adding a history entry per keystroke.
+    const url = new URL(location.href);
+    url.searchParams.set('c', hex.slice(1));
+    history.replaceState(null, '', url);
+  }
+
+  function fromText() {
+    const rgb = parseColor(text.value);
+    if (!rgb) {
+      err.textContent = text.value.trim() ? "Couldn't read that color" : '';
+      return;
+    }
+    err.textContent = '';
+    render(rgb, 'text');
+  }
+
+  text.addEventListener('input', fromText);
+  picker.addEventListener('input', () => {
+    err.textContent = '';
+    const rgb = parseColor(picker.value);
+    if (rgb) render(rgb, 'picker');
+  });
+
+  for (const el of Object.values(sliders)) {
+    el.addEventListener('input', () => {
+      err.textContent = '';
+      render(
+        hslToRgb({
+          h: Number(sliders.h.value),
+          s: Number(sliders.s.value),
+          l: Number(sliders.l.value),
+        }),
+        'slider',
+      );
+    });
+  }
+
+  random.addEventListener('click', () => {
+    err.textContent = '';
+    render(
+      hslToRgb({
+        h: Math.floor(Math.random() * 360),
+        s: 45 + Math.floor(Math.random() * 45),
+        l: 35 + Math.floor(Math.random() * 35),
+      }),
+      'init',
+    );
+  });
+
+  bindCopy();
+
+  // A ?c= param makes any color linkable; fall back to the accent color.
+  const seed = new URLSearchParams(location.search).get('c');
+  render(parseColor(seed ? `#${seed}` : '') ?? { r: 110, g: 231, b: 215 }, 'init');
+</script>
