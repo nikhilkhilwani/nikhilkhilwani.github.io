@@ -238,7 +238,7 @@ const PERMS = [
   import { formatBytes, stemOf } from '../../lib/ui/files';
   import {
     protectPdf, passwordStrength, describePermissions, hasSecureRandom,
-    SourceEncrypted, NoSecureRandom, CIPHERS, loadForProtect,
+    SourceEncrypted, NoSecureRandom, CIPHERS, openPdfDocument,
     type Cipher, type Permissions,
   } from '../../lib/pdf/protect';
 
@@ -334,7 +334,7 @@ const PERMS = [
     // the visitor fills in the whole form. Same code path as the encrypt step,
     // so both classify a bad password identically.
     try {
-      await loadForProtect(bytes, password);
+      await openPdfDocument(bytes, password);
       sourcePanel.hidden = true;
       form.hidden = false;
       syncAll();

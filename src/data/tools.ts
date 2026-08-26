@@ -105,7 +105,7 @@ export const tools: ToolMeta[] = [
     title: 'Unlock PDF',
     description: 'Remove password protection from a PDF you already know the password for.',
     icon: 'unlock',
-    status: 'coming-soon',
+    status: 'available',
     category: 'pdf',
   },
 ];

@@ -8,8 +8,17 @@
  * refused without a password, refused with a wrong one, and opens with either
  * the user or the owner password.
  *
+ * Opening and password classification live in ./pdflib, shared with unlock —
+ * see the measured behaviour table there.
+ *
  * passwordStrength() is pure and covered by scripts/test-tools.mjs.
  */
+
+import { openPdfDocument, SourceEncrypted } from './pdflib.ts';
+
+// Re-exported so pages can import the whole PDF-security surface from here.
+export { SourceEncrypted, loadPdfLib, classifyPasswordError, inspectEncryption, openPdfDocument } from './pdflib.ts';
+export type { Encryption } from './pdflib.ts';
 
 export type Cipher = 'AES-256' | 'AES-128';
 
@@ -36,21 +45,6 @@ export const OPEN_PERMISSIONS: Permissions = {
   fillingForms: true,
 };
 
-/** The source file is itself password-protected, so we need its password too. */
-export class SourceEncrypted extends Error {
-  /** true when a password was supplied and rejected, false when none was given. */
-  readonly wrong: boolean;
-
-  // Written as a field plus an assignment rather than a constructor parameter
-  // property: the latter is TypeScript-only syntax that Node's type stripping
-  // refuses, which would break `npm test` importing this module directly.
-  constructor(wrong: boolean) {
-    super(wrong ? 'That password did not open the file' : 'This PDF is already password-protected');
-    this.wrong = wrong;
-    this.name = 'SourceEncrypted';
-  }
-}
-
 /** AES key generation needs a real CSPRNG, which insecure origins do not expose. */
 export class NoSecureRandom extends Error {
   constructor() {
@@ -61,53 +55,6 @@ export class NoSecureRandom extends Error {
 
 export const hasSecureRandom = (): boolean =>
   typeof crypto !== 'undefined' && typeof crypto.getRandomValues === 'function';
-
-/** Loaded once per page; ~430 kB, so never at import time. */
-let cached: Promise<typeof import('@cantoo/pdf-lib')> | null = null;
-export function loadPdfLib(): Promise<typeof import('@cantoo/pdf-lib')> {
-  cached ??= import('@cantoo/pdf-lib');
-  return cached;
-}
-
-/**
- * Classifies a load failure as a password problem.
- *
- * The library gives a dedicated class for only one of the three cases:
- *   no password given  -> EncryptedPDFError
- *   wrong password     -> bare Error, message "Password incorrect"
- *   empty-string pass  -> bare Error, message "NEEDS PASSWORD"
- *
- * Matching on message text is fragile, so it is confined to this one function:
- * if the library rewords those strings, this is the only place to fix. Verified
- * against @cantoo/pdf-lib 2.9.1.
- */
-export async function classifyPasswordError(
-  err: unknown,
-): Promise<'needs-password' | 'wrong-password' | null> {
-  const { EncryptedPDFError } = await loadPdfLib();
-  if (err instanceof EncryptedPDFError) return 'needs-password';
-
-  const message = err instanceof Error ? err.message : '';
-  if (/password\s+incorrect/i.test(message)) return 'wrong-password';
-  if (/needs\s+password/i.test(message)) return 'needs-password';
-  return null;
-}
-
-/**
- * Loads a PDF, turning any password problem into a SourceEncrypted the UI can
- * act on. Shared by protectPdf() and the page's initial probe so both classify
- * failures identically.
- */
-export async function loadForProtect(bytes: Uint8Array, password?: string) {
-  const { PDFDocument } = await loadPdfLib();
-  try {
-    return await PDFDocument.load(bytes, password ? { password } : undefined);
-  } catch (err) {
-    const kind = await classifyPasswordError(err);
-    if (kind) throw new SourceEncrypted(kind === 'wrong-password');
-    throw err;
-  }
-}
 
 export interface ProtectRequest {
   bytes: Uint8Array;
@@ -140,7 +87,9 @@ export async function protectPdf({
     throw new Error('Set a password to open the file, an owner password, or both');
   }
 
-  const doc = await loadForProtect(bytes, sourcePassword);
+  // openPdfDocument handles owner-only files, which need an empty-string
+  // password rather than none — loadForProtect used to mis-handle those.
+  const doc = await openPdfDocument(bytes, sourcePassword);
 
   doc.encrypt({
     ...(userPassword ? { userPassword } : {}),
