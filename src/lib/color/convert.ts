@@ -1,6 +1,11 @@
 /**
- * sRGB / HSL / HSV / CMYK / OKLCH conversion. Pure functions, no dependencies —
- * this whole module is a few hundred bytes of shipped JS.
+ * Color parsing into sRGB. Pure functions, no dependencies — this whole module
+ * is a few hundred bytes of shipped JS.
+ *
+ * Only the inbound direction is here: parseColor accepts every CSS-ish syntax
+ * the QR generator's color inputs might carry, so each notation needs its
+ * X-to-RGB converter but not the reverse. The rgb-to-X direction and the
+ * formatters went with the color converter and contrast checker tools.
  *
  * Channel ranges: RGB 0-255, HSL/HSV h 0-360 and s/l/v 0-100, CMYK 0-100,
  * OKLCH l 0-1, c 0-0.4ish, h 0-360.
@@ -13,10 +18,6 @@ export interface CMYK { c: number; m: number; y: number; k: number }
 export interface OKLCH { l: number; c: number; h: number }
 
 const clamp = (n: number, lo: number, hi: number) => Math.min(hi, Math.max(lo, n));
-const round = (n: number, dp = 0) => {
-  const f = 10 ** dp;
-  return Math.round(n * f) / f;
-};
 
 /* ------------------------------------------------------------------ hex ---- */
 
@@ -38,24 +39,6 @@ export function hexToRgb(hex: string): RGB | null {
 }
 
 /* ------------------------------------------------------------------ hsl ---- */
-
-export function rgbToHsl({ r, g, b }: RGB): HSL {
-  const rn = r / 255, gn = g / 255, bn = b / 255;
-  const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
-  const d = max - min;
-  const l = (max + min) / 2;
-
-  let h = 0;
-  if (d !== 0) {
-    if (max === rn) h = ((gn - bn) / d) % 6;
-    else if (max === gn) h = (bn - rn) / d + 2;
-    else h = (rn - gn) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  const s = d === 0 ? 0 : d / (1 - Math.abs(2 * l - 1));
-  return { h: round(h, 1), s: round(s * 100, 1), l: round(l * 100, 1) };
-}
 
 export function hslToRgb({ h, s, l }: HSL): RGB {
   const hn = ((h % 360) + 360) % 360;
@@ -80,22 +63,6 @@ export function hslToRgb({ h, s, l }: HSL): RGB {
 
 /* ------------------------------------------------------------------ hsv ---- */
 
-export function rgbToHsv({ r, g, b }: RGB): HSV {
-  const rn = r / 255, gn = g / 255, bn = b / 255;
-  const max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
-  const d = max - min;
-
-  let h = 0;
-  if (d !== 0) {
-    if (max === rn) h = ((gn - bn) / d) % 6;
-    else if (max === gn) h = (bn - rn) / d + 2;
-    else h = (rn - gn) / d + 4;
-    h *= 60;
-    if (h < 0) h += 360;
-  }
-  return { h: round(h, 1), s: round((max === 0 ? 0 : d / max) * 100, 1), v: round(max * 100, 1) };
-}
-
 export function hsvToRgb({ h, s, v }: HSV): RGB {
   const hn = ((h % 360) + 360) % 360;
   const sn = clamp(s, 0, 100) / 100;
@@ -119,18 +86,6 @@ export function hsvToRgb({ h, s, v }: HSV): RGB {
 
 /* ----------------------------------------------------------------- cmyk ---- */
 
-export function rgbToCmyk({ r, g, b }: RGB): CMYK {
-  const rn = r / 255, gn = g / 255, bn = b / 255;
-  const k = 1 - Math.max(rn, gn, bn);
-  if (k === 1) return { c: 0, m: 0, y: 0, k: 100 };
-  return {
-    c: round(((1 - rn - k) / (1 - k)) * 100, 1),
-    m: round(((1 - gn - k) / (1 - k)) * 100, 1),
-    y: round(((1 - bn - k) / (1 - k)) * 100, 1),
-    k: round(k * 100, 1),
-  };
-}
-
 export function cmykToRgb({ c, m, y, k }: CMYK): RGB {
   const cn = clamp(c, 0, 100) / 100, mn = clamp(m, 0, 100) / 100;
   const yn = clamp(y, 0, 100) / 100, kn = clamp(k, 0, 100) / 100;
@@ -144,26 +99,7 @@ export function cmykToRgb({ c, m, y, k }: CMYK): RGB {
 /* ---------------------------------------------------------------- oklch ---- */
 // Björn Ottosson's OKLab, via linear sRGB.
 
-const srgbToLinear = (c: number) => (c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
 const linearToSrgb = (c: number) => (c <= 0.0031308 ? c * 12.92 : 1.055 * c ** (1 / 2.4) - 0.055);
-
-export function rgbToOklch({ r, g, b }: RGB): OKLCH {
-  const lr = srgbToLinear(r / 255), lg = srgbToLinear(g / 255), lb = srgbToLinear(b / 255);
-
-  const l_ = Math.cbrt(0.4122214708 * lr + 0.5363325363 * lg + 0.0514459929 * lb);
-  const m_ = Math.cbrt(0.2119034982 * lr + 0.6806995451 * lg + 0.1073969566 * lb);
-  const s_ = Math.cbrt(0.0883024619 * lr + 0.2817188376 * lg + 0.6299787005 * lb);
-
-  const L = 0.2104542553 * l_ + 0.793617785 * m_ - 0.0040720468 * s_;
-  const A = 1.9779984951 * l_ - 2.428592205 * m_ + 0.4505937099 * s_;
-  const B = 0.0259040371 * l_ + 0.7827717662 * m_ - 0.808675766 * s_;
-
-  const c = Math.sqrt(A * A + B * B);
-  let h = (Math.atan2(B, A) * 180) / Math.PI;
-  if (h < 0) h += 360;
-
-  return { l: round(L, 4), c: round(c, 4), h: round(c < 1e-4 ? 0 : h, 1) };
-}
 
 export function oklchToRgb({ l, c, h }: OKLCH): RGB {
   const hr = (h * Math.PI) / 180;
@@ -187,26 +123,9 @@ export function oklchToRgb({ l, c, h }: OKLCH): RGB {
   };
 }
 
-/** True when an OKLCH triple sits outside the sRGB gamut, i.e. the swatch you
- *  see is a clipped approximation of what you typed. */
-export function isOutOfSrgbGamut({ l, c, h }: OKLCH): boolean {
-  const hr = (h * Math.PI) / 180;
-  const A = Math.cos(hr) * c, B = Math.sin(hr) * c;
-  const l_ = l + 0.3963377774 * A + 0.2158037573 * B;
-  const m_ = l - 0.1055613458 * A - 0.0638541728 * B;
-  const s_ = l - 0.0894841775 * A - 1.291485548 * B;
-  const L = l_ ** 3, M = m_ ** 3, S = s_ ** 3;
-  const ch = [
-    4.0767416621 * L - 3.3077115913 * M + 0.2309699292 * S,
-    -1.2684380046 * L + 2.6097574011 * M - 0.3413193965 * S,
-    -0.0041960863 * L - 0.7034186147 * M + 1.707614701 * S,
-  ].map(linearToSrgb);
-  return ch.some((v) => v < -0.002 || v > 1.002);
-}
-
 /* ----------------------------------------------------------- named colors -- */
 
-/** Common CSS named colors, for name input and nearest-name output. */
+/** Common CSS named colors, so parseColor accepts a name as well as a notation. */
 export const NAMED: Record<string, string> = {
   black: '#000000', white: '#ffffff', red: '#ff0000', lime: '#00ff00', blue: '#0000ff',
   yellow: '#ffff00', cyan: '#00ffff', magenta: '#ff00ff', silver: '#c0c0c0', gray: '#808080',
@@ -229,20 +148,6 @@ export const NAMED: Record<string, string> = {
   slategray: '#708090', lightgray: '#d3d3d3', gainsboro: '#dcdcdc',
   whitesmoke: '#f5f5f5', aliceblue: '#f0f8ff', ghostwhite: '#f8f8ff',
 };
-
-const NAMED_RGB = Object.entries(NAMED).map(([name, hex]) => ({ name, rgb: hexToRgb(hex)! }));
-
-/** Closest named color by plain squared distance in sRGB, plus whether it is exact. */
-export function nearestNamed(rgb: RGB): { name: string; exact: boolean } {
-  let best = NAMED_RGB[0]!;
-  let bestD = Infinity;
-  for (const cand of NAMED_RGB) {
-    const d =
-      (cand.rgb.r - rgb.r) ** 2 + (cand.rgb.g - rgb.g) ** 2 + (cand.rgb.b - rgb.b) ** 2;
-    if (d < bestD) { bestD = d; best = cand; }
-  }
-  return { name: best.name, exact: bestD === 0 };
-}
 
 /* --------------------------------------------------------------- parsing ---- */
 
@@ -292,26 +197,3 @@ export function parseColor(input: string): RGB | null {
       return null;
   }
 }
-
-/* -------------------------------------------------------------- formatting -- */
-
-export const fmt = {
-  hex: (rgb: RGB) => rgbToHex(rgb),
-  rgb: ({ r, g, b }: RGB) => `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})`,
-  hsl: (rgb: RGB) => {
-    const { h, s, l } = rgbToHsl(rgb);
-    return `hsl(${h}, ${s}%, ${l}%)`;
-  },
-  hsv: (rgb: RGB) => {
-    const { h, s, v } = rgbToHsv(rgb);
-    return `hsv(${h}, ${s}%, ${v}%)`;
-  },
-  cmyk: (rgb: RGB) => {
-    const { c, m, y, k } = rgbToCmyk(rgb);
-    return `cmyk(${c}%, ${m}%, ${y}%, ${k}%)`;
-  },
-  oklch: (rgb: RGB) => {
-    const { l, c, h } = rgbToOklch(rgb);
-    return `oklch(${round(l * 100, 2)}% ${c} ${h})`;
-  },
-};

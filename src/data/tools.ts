@@ -1,4 +1,4 @@
-export type ToolCategory = 'color' | 'image' | 'pdf';
+export type ToolCategory = 'image' | 'pdf';
 export type ToolStatus = 'available' | 'coming-soon';
 
 export interface ToolMeta {
@@ -13,7 +13,6 @@ export interface ToolMeta {
 }
 
 export const TOOL_CATEGORIES: { id: ToolCategory; label: string; blurb: string }[] = [
-  { id: 'color', label: 'Color & Design', blurb: 'Convert, check, and collect color.' },
   { id: 'image', label: 'Image & QR', blurb: 'Reshape images without uploading them.' },
   { id: 'pdf', label: 'PDF', blurb: 'Convert, compress, and secure documents in-tab.' },
 ];
@@ -25,33 +24,6 @@ export const TOOL_CATEGORIES: { id: ToolCategory; label: string; blurb: string }
  * is visible without a dead link.
  */
 export const tools: ToolMeta[] = [
-  {
-    slug: 'color-converter',
-    title: 'Color Converter',
-    description:
-      'Convert a color between HEX, RGB, HSL, HSV, CMYK, OKLCH, and CSS named colors, live as you type.',
-    icon: 'palette',
-    status: 'available',
-    category: 'color',
-  },
-  {
-    slug: 'contrast-checker',
-    title: 'Contrast Checker',
-    description:
-      'Check any pair of colors against WCAG 2.1 AA and AAA, preview real text, and auto-fix a failing pair.',
-    icon: 'contrast',
-    status: 'available',
-    category: 'color',
-  },
-  {
-    slug: 'palette-collection',
-    title: 'Palette Collection',
-    description:
-      'Browse curated five-color palettes, filter by mood and hue, and copy any of them as CSS variables.',
-    icon: 'swatch',
-    status: 'available',
-    category: 'color',
-  },
   {
     slug: 'qr-generator',
     title: 'QR Code Generator',

@@ -670,5 +670,228 @@ const plain = await makePlain();
   );
 }
 
+
+/* ------------- 17. word to pdf: the Cause B fixes end to end */
+
+{
+  const pkg = (bodyXml) => {
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${bodyXml}</w:body></w:document>`;
+    const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+ <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+ <Default Extension="xml" ContentType="application/xml"/>
+ <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+ <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
+</Types>`;
+    const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+    const docRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
+ <Relationship Id="rId9" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://nikhilkhilwani.github.io" TargetMode="External"/>
+</Relationships>`;
+    const numbering = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:abstractNum w:abstractNumId="0">
+  <w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/></w:lvl>
+  <w:lvl w:ilvl="1"><w:numFmt w:val="lowerLetter"/></w:lvl>
+ </w:abstractNum>
+ <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+</w:numbering>`;
+    return zipSync({
+      '[Content_Types].xml': strToU8(contentTypes),
+      '_rels/.rels': strToU8(rootRels),
+      'word/document.xml': strToU8(documentXml),
+      'word/_rels/document.xml.rels': strToU8(docRels),
+      'word/numbering.xml': strToU8(numbering),
+    });
+  };
+
+  const body = [
+    // The CV pattern: role, tab, right-hand date.
+    '<w:p><w:r><w:t>Data Engineer</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>2021-2024</w:t></w:r></w:p>',
+    '<w:p><w:r><w:t>A</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>B</w:t></w:r></w:p>',
+    '<w:p><w:r><w:t>H</w:t></w:r><w:r><w:rPr><w:vertAlign w:val="superscript"/></w:rPr><w:t>2</w:t></w:r><w:r><w:t>O</w:t></w:r></w:p>',
+    '<w:p><w:r><w:rPr><w:strike/></w:rPr><w:t>Struck</w:t></w:r></w:p>',
+    '<w:p><w:hyperlink r:id="rId9" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><w:r><w:t>Portfolio</w:t></w:r></w:hyperlink></w:p>',
+    '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Outer</w:t></w:r></w:p>',
+    '<w:p><w:pPr><w:numPr><w:ilvl w:val="1"/><w:numId w:val="1"/></w:numPr></w:pPr><w:r><w:t>Inner</w:t></w:r></w:p>',
+    '<w:tbl>',
+    '<w:tr><w:tc><w:tcPr><w:gridSpan w:val="3"/></w:tcPr><w:p><w:r><w:t>SpanAll</w:t></w:r></w:p></w:tc></w:tr>',
+    '<w:tr><w:tc><w:p><w:r><w:t>one</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>two</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>three</w:t></w:r></w:p></w:tc></w:tr>',
+    '</w:tbl>',
+  ].join('');
+
+  const result = await docxToPdf(pkg(body));
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(result.bytes), isEvalSupported: false }).promise;
+  const page = await pdf.getPage(1);
+  const content = await page.getTextContent();
+  const items = content.items.filter((i) => i.str.trim());
+  const text = items.map((i) => i.str).join(' ');
+  const xOf = (needle) => {
+    const hit = items.find((i) => i.str.includes(needle));
+    return hit ? hit.transform[4] : NaN;
+  };
+
+  // TABS — the fix that matters most for a CV.
+  ok(text.includes('Data Engineer') && text.includes('2021-2024'), 'cause B: both sides of a tab are present');
+  const roleX = xOf('Data Engineer');
+  const dateX = xOf('2021-2024');
+  ok(
+    dateX - roleX > 40,
+    `cause B: a tab pushes the date to a stop rather than one space (gap ${(dateX - roleX).toFixed(0)}pt)`,
+  );
+
+  // SOFT BREAK — must actually break the line, so the two parts differ in y.
+  const yOf = (needle) => {
+    const hit = items.find((i) => i.str.includes(needle));
+    return hit ? hit.transform[5] : NaN;
+  };
+  ok(yOf('A') !== yOf('B'), 'cause B: a soft break puts the halves on different lines');
+
+  // SUPERSCRIPT — smaller and raised.
+  const sup = items.find((i) => i.str.trim() === '2');
+  ok(sup, 'cause B: the superscript character is drawn');
+  if (sup) {
+    const base = items.find((i) => i.str.includes('H'));
+    ok(sup.height < base.height, `cause B: superscript is smaller (${sup.height.toFixed(1)} < ${base.height.toFixed(1)})`);
+    ok(sup.transform[5] > base.transform[5], 'cause B: superscript sits higher than the baseline');
+  }
+
+  ok(text.includes('Struck'), 'cause B: struck-through text is still drawn');
+
+  // HYPERLINK — a real annotation, not just coloured text.
+  const annots = await page.getAnnotations();
+  const link = annots.find((a) => a.subtype === 'Link');
+  ok(!!link, 'cause B: a Link annotation exists in the PDF');
+  eq(link?.url, 'https://nikhilkhilwani.github.io/', 'cause B: it points at the right URL');
+  eq(result.links, 1, 'cause B: the conversion reports one clickable link');
+  ok(Array.isArray(link?.rect) && link.rect[2] > link.rect[0], 'cause B: the hotspot has a real width');
+
+  // NESTED LIST MARKERS — 1. then a., as Word does.
+  ok(text.includes('1.'), 'cause B: the outer ordered item is numbered 1.');
+  ok(/\ba\./.test(text), 'cause B: the nested ordered item is lettered a.');
+
+  // MERGED CELL — spans the table rather than sitting in one column.
+  ok(text.includes('SpanAll') && text.includes('three'), 'cause B: merged and plain cells both render');
+
+  ok(result.unsupported.length === 0, 'cause B: nothing became an unsupported character');
+}
+
+
+/* ------------- 18. word to pdf: Cause A — appearance from document.xml */
+
+{
+  const pkgA = (bodyXml) => {
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${bodyXml}</w:body></w:document>`;
+    const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+ <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+ <Default Extension="xml" ContentType="application/xml"/>
+ <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>`;
+    const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+    return zipSync({
+      '[Content_Types].xml': strToU8(contentTypes),
+      '_rels/.rels': strToU8(rootRels),
+      'word/document.xml': strToU8(documentXml),
+    });
+  };
+
+  const body = [
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>CENTRED</w:t></w:r></w:p>',
+    '<w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>RIGHTED</w:t></w:r></w:p>',
+    '<w:p><w:r><w:t>PLAINLEFT</w:t></w:r></w:p>',
+    '<w:p><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>BIGTEXT</w:t></w:r></w:p>',
+    '<w:p><w:pPr><w:ind w:left="1440"/></w:pPr><w:r><w:t>INDENTED</w:t></w:r></w:p>',
+    // The CV line: a right tab stop near the right margin.
+    '<w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="9000"/></w:tabs></w:pPr>'
+      + '<w:r><w:t>ROLE</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>DATES</w:t></w:r></w:p>',
+    '<w:sectPr><w:pgSz w:w="12240" w:h="15840"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>',
+  ].join('');
+
+  const result = await docxToPdf(pkgA(body));
+
+  ok(result.styled >= 6, `cause A: appearance recovered for ${result.styled} paragraphs`);
+  eq(result.unstyled, 0, 'cause A: every paragraph correlated');
+
+  // Page setup came from the document: US Letter, one-inch margins.
+  ok(!!result.pageSetup, 'cause A: page setup was read from the document');
+  ok(
+    result.pageSetup && Math.abs(result.pageSetup.width - 612) < 1 && Math.abs(result.pageSetup.height - 792) < 1,
+    `cause A: Letter size read from w:pgSz (${result.pageSetup?.width.toFixed(0)}x${result.pageSetup?.height.toFixed(0)})`,
+  );
+  eq(result.pageSetup?.margin, 72, 'cause A: one-inch margin read from w:pgMar');
+
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(result.bytes), isEvalSupported: false }).promise;
+  const page1 = await pdf.getPage(1);
+  const size = page1.getViewport({ scale: 1 });
+  ok(
+    Math.abs(size.width - 612) < 1 && Math.abs(size.height - 792) < 1,
+    `cause A: the PDF page IS the document's size, not the default A4 (${size.width.toFixed(0)}x${size.height.toFixed(0)})`,
+  );
+
+  const items = (await page1.getTextContent()).items.filter((i) => i.str.trim());
+  const find = (needle) => items.find((i) => i.str.replace(/\s/g, '').includes(needle));
+  const xOf = (needle) => (find(needle) ? find(needle).transform[4] : NaN);
+  const endOf = (needle) => {
+    const hit = find(needle);
+    return hit ? hit.transform[4] + hit.width : NaN;
+  };
+
+  const left = xOf('PLAINLEFT');
+  ok(Number.isFinite(left), 'cause A: the plain paragraph is drawn');
+
+  // ALIGNMENT — the most visible of the lot.
+  ok(xOf('CENTRED') > left + 40, `cause A: a centred paragraph starts well right of the margin (${xOf('CENTRED').toFixed(0)} vs ${left.toFixed(0)})`);
+  ok(xOf('RIGHTED') > xOf('CENTRED'), 'cause A: a right-aligned paragraph starts further right still');
+  ok(
+    Math.abs(endOf('RIGHTED') - (612 - 72)) < 6,
+    `cause A: right-aligned text ends at the right margin (${endOf('RIGHTED').toFixed(0)} vs ${612 - 72})`,
+  );
+
+  // SIZE
+  const big = find('BIGTEXT');
+  const plain = find('PLAINLEFT');
+  ok(big.height > plain.height * 1.6, `cause A: w:sz 48 renders larger (${big.height.toFixed(1)} vs ${plain.height.toFixed(1)})`);
+
+  // INDENT
+  ok(
+    Math.abs(xOf('INDENTED') - (left + 72)) < 2,
+    `cause A: a 1440-twip indent moves the text one inch (${(xOf('INDENTED') - left).toFixed(0)}pt)`,
+  );
+
+  // RIGHT TAB STOP — the CV case
+  ok(
+    Math.abs(endOf('DATES') - (72 + 450)) < 8,
+    `cause A: the date ends on the declared right stop (${endOf('DATES').toFixed(0)} vs ${72 + 450})`,
+  );
+  ok(xOf('DATES') - endOf('ROLE') > 100, 'cause A: and there is a real gap, not a single space');
+
+  // Turning it off must fall back to the requested geometry.
+  const forced = await docxToPdf(pkgA(body), { useDocumentPageSetup: false });
+  const forcedPdf = await pdfjs.getDocument({ data: new Uint8Array(forced.bytes), isEvalSupported: false }).promise;
+  const forcedSize = (await forcedPdf.getPage(1)).getViewport({ scale: 1 });
+  ok(
+    Math.abs(forcedSize.width - 595.28) < 1,
+    `cause A: opting out uses the chosen page size instead (${forcedSize.width.toFixed(0)})`,
+  );
+
+  // A document with no sectPr must not break anything.
+  const bare = await docxToPdf(pkgA('<w:p><w:r><w:t>Just text</w:t></w:r></w:p>'));
+  eq(bare.pageSetup, null, 'cause A: no sectPr reports no page setup');
+  ok(bare.pages === 1, 'cause A: and still converts fine');
+
+  // Correlation must degrade safely, never misformat.
+  ok(describeConversion(result).includes('recovered for'), 'cause A: the summary reports what was recovered');
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

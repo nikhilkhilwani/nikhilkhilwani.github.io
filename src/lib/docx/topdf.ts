@@ -12,7 +12,8 @@
  */
 
 import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
-import { layout, DEFAULT_SCALE, A4, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
+import { readParagraphProps, readPageSetup, correlate, type PageSetup } from './wordxml.ts';
+import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
 
 let cachedMammoth: Promise<typeof import('mammoth')> | null = null;
 /** ~200 kB, so never at import time. */
@@ -47,11 +48,24 @@ export interface ConvertResult {
   /** Warnings mammoth raised about the source document. */
   notes: string[];
   imagesDropped: number;
+  /** Clickable hyperlinks written into the PDF. */
+  links: number;
+  /** Paragraphs whose Word appearance was recovered and applied. */
+  styled: number;
+  /** Paragraphs where the text did not line up, so defaults were kept. */
+  unstyled: number;
+  /** Page setup taken from the document, when it had any. */
+  pageSetup: PageSetup | null;
 }
 
 export interface ConvertOptions {
   geometry?: PageGeometry;
   scale?: TypeScale;
+  /**
+   * Take page size and margins from the document itself when it declares them.
+   * The explicit `geometry` is the fallback for documents that do not.
+   */
+  useDocumentPageSetup?: boolean;
 }
 
 /** A .docx is a ZIP; every one starts with the local file header "PK\x03\x04". */
@@ -61,7 +75,7 @@ export function looksLikeDocx(bytes: Uint8Array): boolean {
 
 export async function docxToPdf(
   input: Uint8Array,
-  { geometry = A4, scale = DEFAULT_SCALE }: ConvertOptions = {},
+  { geometry = A4, scale = DEFAULT_SCALE, useDocumentPageSetup = true }: ConvertOptions = {},
 ): Promise<ConvertResult> {
   if (!looksLikeDocx(input)) throw new NotADocx();
 
@@ -101,7 +115,42 @@ export async function docxToPdf(
 
   const unsupported = unsupportedCharacters(blocks);
 
-  const { PDFDocument, StandardFonts, rgb } = await loadPdfLib();
+  /* ---- appearance mammoth discards, read straight from the document ---- */
+
+  // A second pass over the same file. It cannot fail the conversion: if the XML
+  // is unreadable or the paragraphs do not line up, the document simply renders
+  // with defaults, exactly as it did before this existed.
+  let appearanceFor: ((block: Block) => BlockAppearance | undefined) | undefined;
+  let styled = 0;
+  let unstyled = 0;
+  let pageSetup: PageSetup | null = null;
+
+  try {
+    const { unzipSync, strFromU8 } = await import('fflate');
+    const entries = unzipSync(input.slice(), { filter: (f) => f.name === 'word/document.xml' });
+    const documentXml = entries['word/document.xml'] ? strFromU8(entries['word/document.xml']) : '';
+
+    if (documentXml) {
+      pageSetup = readPageSetup(documentXml);
+      const props = readParagraphProps(documentXml);
+      const matched = correlate(blocks, props);
+      styled = matched.applied;
+      unstyled = matched.skipped;
+      appearanceFor = (block) => {
+        const p = matched.attach(block);
+        if (!p) return undefined;
+        return { align: p.align, size: p.size, indent: p.indent, firstLine: p.firstLine, tabs: p.tabs };
+      };
+    }
+  } catch {
+    // Deliberately silent: this is an enhancement, not a requirement.
+  }
+
+  // Named to avoid colliding with the `page` loop variable below.
+  const pageBox = useDocumentPageSetup && pageSetup ? pageSetup : geometry;
+
+
+  const { PDFDocument, StandardFonts, rgb, PDFString } = await loadPdfLib();
   const pdf = await PDFDocument.create();
   pdf.setProducer('nikhilkhilwani.github.io/tools/word-to-pdf');
 
@@ -128,24 +177,75 @@ export async function docxToPdf(
     }
   };
 
-  const laid: LaidOutPage[] = layout(blocks, { geometry, scale, measure, maxImageWidth: geometry.width - geometry.margin * 2 });
+  const laid: LaidOutPage[] = layout(blocks, {
+    geometry: pageBox,
+    scale,
+    measure,
+    maxImageWidth: pageBox.width - pageBox.margin * 2,
+    appearance: appearanceFor,
+  });
 
   let imagesDropped = 0;
+  let links = 0;
+  const ink = rgb(0.09, 0.09, 0.11);
+  const linkInk = rgb(0.05, 0.32, 0.55);
 
   for (const page of laid) {
-    const sheet = pdf.addPage([geometry.width, geometry.height]);
+    const sheet = pdf.addPage([pageBox.width, pageBox.height]);
 
     for (const item of page.items) {
       if (item.kind === 'line') {
         for (const piece of item.line.pieces) {
-          if (!piece.text.trim()) continue;
-          sheet.drawText(safe(piece.text), {
-            x: item.x + piece.x,
-            y: item.y,
-            size: piece.size,
-            font: pick(piece.bold, piece.italic),
-            color: rgb(0.09, 0.09, 0.11),
-          });
+          const x = item.x + piece.x;
+          const y = item.y + piece.rise;
+
+          if (piece.text.trim()) {
+            sheet.drawText(safe(piece.text), {
+              x,
+              y,
+              size: piece.size,
+              font: pick(piece.bold, piece.italic),
+              color: piece.href ? linkInk : ink,
+            });
+          }
+
+          // A link is only useful if it can be followed, so draw the rule and
+          // register a real annotation rather than colouring the text and
+          // hoping the reader notices.
+          if (piece.href && piece.width > 0) {
+            sheet.drawLine({
+              start: { x, y: y - piece.size * 0.1 },
+              end: { x: x + piece.width, y: y - piece.size * 0.1 },
+              thickness: Math.max(0.4, piece.size * 0.045),
+              color: linkInk,
+            });
+            const annot = pdf.context.obj({
+              Type: 'Annot',
+              Subtype: 'Link',
+              Rect: [x, y - piece.size * 0.25, x + piece.width, y + piece.size * 0.9],
+              // No visible frame: the underline already signals the link.
+              Border: [0, 0, 0],
+              A: pdf.context.obj({ Type: 'Action', S: 'URI', URI: PDFString.of(piece.href) }),
+            });
+            sheet.node.addAnnot(pdf.context.register(annot));
+            links++;
+          } else if (piece.underline && piece.width > 0) {
+            sheet.drawLine({
+              start: { x, y: y - piece.size * 0.1 },
+              end: { x: x + piece.width, y: y - piece.size * 0.1 },
+              thickness: Math.max(0.4, piece.size * 0.045),
+              color: ink,
+            });
+          }
+
+          if (piece.strike && piece.width > 0) {
+            sheet.drawLine({
+              start: { x, y: y + piece.size * 0.28 },
+              end: { x: x + piece.width, y: y + piece.size * 0.28 },
+              thickness: Math.max(0.4, piece.size * 0.045),
+              color: ink,
+            });
+          }
         }
         continue;
       }
@@ -201,6 +301,10 @@ export async function docxToPdf(
     unsupported,
     notes,
     imagesDropped,
+    links,
+    styled,
+    unstyled,
+    pageSetup,
   };
 }
 
@@ -227,6 +331,19 @@ export function describeConversion(result: ConvertResult): string {
       `${result.unsupported.length} character${result.unsupported.length === 1 ? '' : 's'} could not be drawn (${shown}) and became "?" — the built-in PDF fonts cover Latin only.`,
     );
   }
+  if (result.styled) {
+    parts.push(
+      `Alignment, sizes, indents and tab stops recovered for ${result.styled} paragraph${result.styled === 1 ? '' : 's'}.`,
+    );
+  }
+  if (result.pageSetup) {
+    parts.push(
+      `Page size taken from the document (${Math.round(result.pageSetup.width)}x${Math.round(result.pageSetup.height)} pt).`,
+    );
+  }
+  if (result.links) {
+    parts.push(`${result.links} link${result.links === 1 ? '' : 's'} stayed clickable.`);
+  }
   if (result.imagesDropped) {
     parts.push(`${result.imagesDropped} image${result.imagesDropped === 1 ? '' : 's'} in an unsupported format were left out.`);
   }
@@ -234,9 +351,10 @@ export function describeConversion(result: ConvertResult): string {
 }
 
 export const LAYOUT_CAVEATS = [
-  'Line and page breaks will not match Word exactly — Word measures with Calibri and Cambria, which cannot be redistributed',
-  'Headers, footers, page numbers and footnotes are not carried over',
-  'Columns, text boxes and precise spacing are approximated',
+  'Line breaks will not match Word exactly — Word measures with Calibri and Cambria, which cannot be redistributed',
+  'Font colours and highlighting are not carried over, and a paragraph mixing sizes takes its first size',
+  'Headers, footers, page numbers, footnotes and explicit page breaks are not carried over',
+  'Columns, text boxes, shapes and vertically merged cells are not reproduced',
 ] as const;
 
 export type { Block };

@@ -1,15 +1,14 @@
 ---
 import BaseLayout from '../../layouts/BaseLayout.astro';
 import ToolCard from '../../components/ToolCard.astro';
-import { TOOL_CATEGORIES, toolsByCategory, availableTools, tools } from '../../data/tools';
+import { TOOL_CATEGORIES, toolsByCategory, availableTools } from '../../data/tools';
 
 const liveCount = availableTools.length;
-const plannedCount = tools.length - liveCount;
 ---
 
 <BaseLayout
   title="Tools — Nikhil Khilwani"
-  description={`${liveCount} free browser-based tools for color, images, and PDFs. Everything runs locally — no uploads, no accounts, no limits.`}
+  description={`${liveCount} free browser-based tools for images, QR codes, and PDFs. Everything runs locally — no uploads, no accounts, no limits.`}
 >
   <div class="shell">
     <header class="intro">

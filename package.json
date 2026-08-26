@@ -8,8 +8,7 @@
     "build": "npm run sync:pdfjs && astro build",
     "preview": "astro preview",
     "check": "astro check",
-    "palettes": "node scripts/gen-palettes.mjs src/data/palettes.ts",
-    "test": "node scripts/test-color.mjs && node scripts/test-tools.mjs && node scripts/test-pdf.mjs",
+    "test": "node scripts/test-tools.mjs && node scripts/test-pdf.mjs",
     "sync:pdfjs": "node scripts/sync-pdfjs.mjs",
     "verify": "npm run check && npm run test && npm run build && node scripts/test-dom.mjs",
     "test:pdf": "node scripts/test-pdf.mjs"

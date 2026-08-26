@@ -21,7 +21,8 @@ import { LAYOUT_CAVEATS } from '../../lib/docx/topdf';
         <div class="field">
           <label for="wp-size">Page size</label>
           <select id="wp-size">
-            {PAGE_SIZES.map((p) => <option value={p.id} selected={p.id === 'a4'}>{p.label}</option>)}
+            <option value="document" selected>Match the document</option>
+            {PAGE_SIZES.map((p) => <option value={p.id}>{p.label}</option>)}
           </select>
         </div>
 
@@ -187,6 +188,8 @@ import { LAYOUT_CAVEATS } from '../../lib/docx/topdf';
     result.replaceChildren();
 
     try {
+      // "Match the document" reads w:pgSz and w:pgMar; anything else overrides it.
+      const useDocumentPageSetup = sizeSel.value === 'document';
       const geometry = PAGE_SIZES.find((p) => p.id === sizeSel.value)?.geometry;
       const body = Number(bodySize.value) || DEFAULT_SCALE.body;
       // Headings scale with the body size so the hierarchy holds at any setting.
@@ -194,6 +197,7 @@ import { LAYOUT_CAVEATS } from '../../lib/docx/topdf';
 
       const out = await docxToPdf(bytes, {
         geometry,
+        useDocumentPageSetup,
         scale: {
           body,
           h1: DEFAULT_SCALE.h1 * ratio,

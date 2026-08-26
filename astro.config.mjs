@@ -3,7 +3,7 @@ import { defineConfig } from 'astro/config';
 // User site, served from the domain root — no `base` path needed.
 export default defineConfig({
   site: 'https://nikhilkhilwani.github.io',
-  // Emits tools/color-converter/index.html, so /tools/color-converter is a real
+  // Emits tools/qr-generator/index.html, so /tools/qr-generator is a real
   // URL GitHub Pages can serve directly. No 404.html router hack required.
   build: { format: 'directory' },
   vite: {

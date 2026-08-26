@@ -1,5 +1,6 @@
 /**
- * Page layout for the block model: line breaking, pagination, lists, tables.
+ * Page layout for the block model: line breaking, tab stops, pagination,
+ * lists, tables.
  *
  * The font measurer is injected, so this whole pass is pure and runs anywhere.
  * That is what makes pagination testable without a PDF library — and
@@ -8,7 +9,8 @@
  * Covered by scripts/test-tools.mjs.
  */
 
-import type { Block, Run } from './blocks.ts';
+import type { Block, Cell, Run } from './blocks.ts';
+import type { Align, TabStop } from './wordxml.ts';
 
 /** Width of `text` at `size` in the given style. Supplied by the renderer. */
 export type Measure = (text: string, style: { bold: boolean; italic: boolean; size: number }) => number;
@@ -28,6 +30,13 @@ export const PAGE_SIZES: { id: string; label: string; geometry: PageGeometry }[]
   { id: 'letter', label: 'US Letter — 8.5 × 11 in', geometry: LETTER },
 ];
 
+/**
+ * Word's default tab stops sit every half inch. Used only when the paragraph
+ * declares no stops of its own; wordxml.ts reads the real ones straight out of
+ * document.xml.
+ */
+export const TAB_WIDTH = 36;
+
 export interface TypeScale {
   body: number;
   h1: number;
@@ -39,18 +48,28 @@ export interface TypeScale {
 
 export const DEFAULT_SCALE: TypeScale = { body: 11, h1: 20, h2: 15.5, h3: 12.5, lineHeight: 1.38 };
 
+/** Superscript and subscript are drawn at this fraction of the body size. */
+export const SCRIPT_SCALE = 0.72;
+
 /** A run positioned on a line. */
 export interface Piece {
   text: string;
   bold: boolean;
   italic: boolean;
+  underline: boolean;
+  strike: boolean;
+  script?: 'super' | 'sub';
+  href?: string;
   size: number;
   x: number;
+  /** Measured width, so the renderer can draw rules and link targets. */
+  width: number;
+  /** Baseline shift for super/subscript. */
+  rise: number;
 }
 
 export interface Line {
   pieces: Piece[];
-  /** Baseline offset from the top of the line box. */
   size: number;
   height: number;
 }
@@ -71,6 +90,23 @@ export interface LayoutOptions {
   measure: Measure;
   /** Longest edge an image may occupy, in points. */
   maxImageWidth?: number;
+  /**
+   * Appearance read from word/document.xml, keyed by block. Absent entries
+   * simply fall back to the defaults, so a correlation miss is harmless.
+   */
+  appearance?: (block: Block) => BlockAppearance | undefined;
+}
+
+/** The subset of Word paragraph properties this layout honours. */
+export interface BlockAppearance {
+  align?: Align;
+  /** Overrides the type scale for this block. */
+  size?: number;
+  /** Left indent in points. */
+  indent?: number;
+  /** First-line offset; negative hangs. */
+  firstLine?: number;
+  tabs?: TabStop[];
 }
 
 const sizeFor = (block: Block, scale: TypeScale): number => {
@@ -80,62 +116,198 @@ const sizeFor = (block: Block, scale: TypeScale): number => {
   return scale.body;
 };
 
+/** Next tab stop strictly after `x`, measured from the block's left edge. */
+export const nextTabStop = (x: number, width = TAB_WIDTH): number =>
+  (Math.floor(x / width) + 1) * width;
+
 /**
  * Breaks styled runs into lines that fit `width`.
  *
- * Wrapping happens across runs, not within them, so a bold word in the middle
- * of a sentence does not force a break. A single word longer than the line is
- * placed anyway rather than looping forever.
+ * Wrapping happens across runs, not within them, so a bold word mid-sentence
+ * does not force a break. Beyond plain words it honours:
+ *   \t  advances to the next tab stop — what makes a CV's dates line up
+ *   \n  breaks the line where the author asked
+ *   super/subscript runs, measured at their reduced size
+ *
+ * `tabs` are the stops declared by the paragraph itself. A RIGHT stop is the
+ * one that matters most: Word CVs put the date on a right stop at the margin,
+ * and the text after such a tab has to end at that position rather than start
+ * there. Without stops, Word's default half-inch grid is used.
+ *
+ * A single word wider than the line is placed anyway rather than looping.
  */
 export function wrapRuns(
   runs: Run[],
   size: number,
   width: number,
   measure: Measure,
+  tabs: TabStop[] = [],
 ): Line[] {
   const lines: Line[] = [];
   let pieces: Piece[] = [];
   let x = 0;
 
   const flush = () => {
-    if (pieces.length) lines.push({ pieces, size, height: size });
+    while (pieces.length && /^ +$/.test(pieces[pieces.length - 1].text)) pieces.pop();
+    lines.push({ pieces, size, height: size });
     pieces = [];
     x = 0;
   };
 
+  /** Width of everything from `from` until the next tab or the end. */
+  const segmentWidth = (tokens: { text: string; w: number }[], from: number): number => {
+    let total = 0;
+    for (let i = from; i < tokens.length; i++) {
+      if (tokens[i].text === '\t' || tokens[i].text === '\n') break;
+      total += tokens[i].w;
+    }
+    return total;
+  };
+
+  // Flatten to tokens first, so a right-aligned tab can measure what follows it.
+  const tokens: { text: string; w: number; run: Run; style: { bold: boolean; italic: boolean; size: number }; rise: number }[] = [];
   for (const run of runs) {
-    const style = { bold: !!run.bold, italic: !!run.italic, size };
-    // Keep the separators so spacing between runs survives.
-    const words = run.text.split(/(\s+)/).filter((w) => w.length);
-
-    for (const word of words) {
-      const w = measure(word, style);
-
-      if (/^\s+$/.test(word)) {
-        // Never start a line with whitespace.
-        if (x > 0) {
-          pieces.push({ text: word, ...style, x });
-          x += w;
-        }
-        continue;
-      }
-
-      if (x + w > width && x > 0) {
-        // Drop any trailing space before breaking.
-        while (pieces.length && /^\s+$/.test(pieces[pieces.length - 1].text)) {
-          const removed = pieces.pop()!;
-          x -= measure(removed.text, { bold: removed.bold, italic: removed.italic, size });
-        }
-        flush();
-      }
-
-      pieces.push({ text: word, ...style, x });
-      x += w;
+    const scripted = run.script ? size * SCRIPT_SCALE : size;
+    const style = { bold: !!run.bold, italic: !!run.italic, size: scripted };
+    const rise = run.script === 'super' ? size * 0.33 : run.script === 'sub' ? -size * 0.16 : 0;
+    for (const text of run.text.split(/(\t|\n|[^\S\t\n]+)/).filter((t) => t.length)) {
+      const w = text === '\t' || text === '\n' ? 0 : measure(text, style);
+      tokens.push({ text, w, run, style, rise });
     }
   }
 
-  flush();
-  return lines;
+  for (const [index, token] of tokens.entries()) {
+    const { text, w, run, style, rise } = token;
+
+    if (text === '\n') {
+      flush();
+      continue;
+    }
+
+    if (text === '\t') {
+      const stop = tabs.find((t) => t.pos > x + 0.01);
+      let target: number;
+
+      if (stop && stop.align === 'right') {
+        // Place the following text so it ENDS on the stop.
+        const following = segmentWidth(tokens, index + 1);
+        target = Math.max(x, Math.min(stop.pos, width) - following);
+      } else if (stop) {
+        target = stop.pos;
+      } else {
+        target = nextTabStop(x);
+      }
+
+      if (target >= width) {
+        flush();
+        continue;
+      }
+      pieces.push({
+        text: '',
+        ...style,
+        underline: false,
+        strike: false,
+        script: run.script,
+        href: run.href,
+        x,
+        width: Math.max(0, target - x),
+        rise,
+      });
+      x = target;
+      continue;
+    }
+
+    if (/^[^\S\t\n]+$/.test(text)) {
+      if (x > 0) {
+        pieces.push({
+          text,
+          ...style,
+          underline: !!run.underline,
+          strike: !!run.strike,
+          script: run.script,
+          href: run.href,
+          x,
+          width: w,
+          rise,
+        });
+        x += w;
+      }
+      continue;
+    }
+
+    if (x + w > width && x > 0) {
+      while (pieces.length && /^ +$/.test(pieces[pieces.length - 1].text)) {
+        const removed = pieces.pop()!;
+        x -= removed.width;
+      }
+      flush();
+    }
+
+    pieces.push({
+      text,
+      ...style,
+      underline: !!run.underline,
+      strike: !!run.strike,
+      script: run.script,
+      href: run.href,
+      x,
+      width: w,
+      rise,
+    });
+    x += w;
+  }
+
+  if (pieces.length) flush();
+  return lines.filter((l, i) => l.pieces.length || (i > 0 && i < lines.length - 1));
+}
+
+/** Total width a line occupies, from its first piece to its last. */
+export const lineWidth = (line: Line): number => {
+  if (!line.pieces.length) return 0;
+  const last = line.pieces[line.pieces.length - 1];
+  return last.x + last.width;
+};
+
+/**
+ * Shifts or stretches a line to satisfy `align`.
+ *
+ * Centre and right simply offset every piece. Justify distributes the slack
+ * across the spaces, and deliberately skips the last line of a block — a
+ * stretched final line is the classic sign of a naive justifier.
+ */
+export function alignLine(line: Line, align: Align, width: number, isLast: boolean): Line {
+  const used = lineWidth(line);
+  if (!line.pieces.length || used <= 0) return line;
+
+  if (align === 'center' || align === 'right') {
+    const slack = width - used;
+    if (slack <= 0) return line;
+    const shift = align === 'center' ? slack / 2 : slack;
+    return { ...line, pieces: line.pieces.map((p) => ({ ...p, x: p.x + shift })) };
+  }
+
+  if (align === 'justify' && !isLast) {
+    const gaps = line.pieces.filter((p) => /^ +$/.test(p.text));
+    const slack = width - used;
+    // Only close a genuine gap; stretching by a huge amount looks worse than
+    // leaving the line ragged.
+    if (!gaps.length || slack <= 0 || slack > width * 0.25) return line;
+    const extra = slack / gaps.length;
+    let shift = 0;
+    return {
+      ...line,
+      pieces: line.pieces.map((p) => {
+        const moved = { ...p, x: p.x + shift };
+        if (/^ +$/.test(p.text)) {
+          moved.width = p.width + extra;
+          shift += extra;
+        }
+        return moved;
+      }),
+    };
+  }
+
+  return line;
 }
 
 /** Equal columns, which is predictable and never overflows the text area. */
@@ -144,6 +316,16 @@ export function columnWidths(columns: number, available: number, gap = 8): numbe
   const each = (available - gap * (columns - 1)) / columns;
   return Array.from({ length: columns }, () => Math.max(24, each));
 }
+
+/** Total columns in a table, counting spans. */
+export const tableColumns = (rows: Cell[][]): number =>
+  Math.max(1, ...rows.map((row) => row.reduce((sum, c) => sum + Math.max(1, c.span), 0)));
+
+/** Width of a cell that spans several columns, including the gaps it swallows. */
+export const spanWidth = (widths: number[], start: number, span: number, gap = 8): number => {
+  const taken = widths.slice(start, start + Math.max(1, span));
+  return taken.reduce((sum, w) => sum + w, 0) + gap * Math.max(0, taken.length - 1);
+};
 
 /**
  * Flows blocks onto pages.
@@ -169,9 +351,6 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
   const room = (needed: number) => y - needed >= bottom;
 
   for (const [index, block] of blocks.entries()) {
-    const size = sizeFor(block, scale);
-    const lineHeight = size * scale.lineHeight;
-
     if (block.kind === 'rule') {
       if (!room(14)) newPage();
       y -= 8;
@@ -181,8 +360,6 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
     }
 
     if (block.kind === 'image') {
-      // Without intrinsic dimensions here, assume a sensible printed width and
-      // let the renderer correct the aspect ratio.
       const width = Math.min(options.maxImageWidth ?? textWidth, textWidth);
       const height = width * 0.75;
       if (!room(height + 12)) newPage();
@@ -193,30 +370,39 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
     }
 
     if (block.kind === 'table') {
-      const columns = Math.max(...block.rows.map((r) => r.length), 1);
+      const columns = tableColumns(block.rows);
       const widths = columnWidths(columns, textWidth);
       const padding = 4;
+      const gap = 8;
 
       for (const row of block.rows) {
-        // Wrap every cell first so the row height is known before committing.
-        const cells = row.map((cell, c) => wrapRuns(cell, scale.body, widths[c] - padding * 2, measure));
-        const rowHeight = Math.max(
-          scale.body * scale.lineHeight,
-          ...cells.map((lines) => lines.length * scale.body * scale.lineHeight),
-        ) + padding * 2;
+        // Wrap every cell first, at its true spanned width, so the row height
+        // is known before anything is committed to a page.
+        let column = 0;
+        const measured = row.map((cellItem) => {
+          const span = Math.max(1, cellItem.span);
+          const width = spanWidth(widths, column, span, gap);
+          const start = column;
+          column += span;
+          return { cellItem, start, span, width, lines: wrapRuns(cellItem.runs, scale.body, width - padding * 2, measure) };
+        });
 
-        // A row split across pages is unreadable, so move the whole row.
+        const rowHeight =
+          Math.max(
+            scale.body * scale.lineHeight,
+            ...measured.map((m) => m.lines.length * scale.body * scale.lineHeight),
+          ) + padding * 2;
+
         if (!room(rowHeight)) newPage();
 
-        let x = geometry.margin;
-        for (const [c, lines] of cells.entries()) {
-          items.push({ kind: 'cellBox', x, y: y - rowHeight, width: widths[c], height: rowHeight });
+        for (const m of measured) {
+          const x = geometry.margin + spanWidth(widths, 0, m.start, gap) + (m.start > 0 ? gap : 0);
+          items.push({ kind: 'cellBox', x, y: y - rowHeight, width: m.width, height: rowHeight });
           let ty = y - padding - scale.body;
-          for (const line of lines) {
+          for (const line of m.lines) {
             items.push({ kind: 'line', x: x + padding, y: ty, line });
             ty -= scale.body * scale.lineHeight;
           }
-          x += widths[c] + 8;
         }
         y -= rowHeight;
       }
@@ -226,14 +412,37 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
 
     /* --- heading, paragraph, list item --- */
 
-    const indent = block.kind === 'listItem' ? 18 * block.level : 0;
-    const markerWidth = block.kind === 'listItem' ? 16 : 0;
-    const lines = wrapRuns(block.runs, size, textWidth - indent - markerWidth, measure);
-    if (!lines.length) continue;
+    const look = options.appearance?.(block) ?? {};
+    const size = look.size ?? sizeFor(block, scale);
+    const lineHeight = size * scale.lineHeight;
+
+    const listIndent = block.kind === 'listItem' ? 18 * block.level : 0;
+    const markerWidth = block.kind === 'listItem' ? 18 : 0;
+    const indent = listIndent + Math.max(0, look.indent ?? 0);
+    const firstLine = look.firstLine ?? 0;
+
+    // A positive first-line indent narrows every line slightly rather than
+    // letting the first one overflow the right margin; a hanging indent pulls
+    // the first line left and leaves the width alone.
+    const reserve = Math.max(0, firstLine);
+    const available = textWidth - indent - markerWidth - reserve;
+
+    // Word measures tab stops from the left margin, but wrapRuns works from the
+    // block's own left edge, so shift them by the indent.
+    const tabs = (look.tabs ?? [])
+      .map((t) => ({ ...t, pos: t.pos - indent }))
+      .filter((t) => t.pos > 0);
+
+    const wrapped = wrapRuns(block.runs, size, available, measure, tabs);
+    if (!wrapped.length) continue;
+
+    const align: Align = look.align ?? 'left';
+    const lines = wrapped.map((line, i) =>
+      alignLine(line, align, available, i === wrapped.length - 1),
+    );
 
     const spaceBefore = block.kind === 'heading' ? size * 0.85 : scale.body * 0.5;
 
-    // Keep a heading with the first line of whatever follows it.
     const needed =
       block.kind === 'heading'
         ? spaceBefore + lines.length * lineHeight + scale.body * scale.lineHeight
@@ -254,15 +463,34 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
           line: {
             size,
             height: size,
-            pieces: [{ text: block.marker, bold: false, italic: false, size, x: 0 }],
+            pieces: [
+              {
+                text: block.marker,
+                bold: false,
+                italic: false,
+                underline: false,
+                strike: false,
+                size,
+                x: 0,
+                width: measure(block.marker, { bold: false, italic: false, size }),
+                rise: 0,
+              },
+            ],
           },
         });
       }
-      items.push({ kind: 'line', x: geometry.margin + indent + markerWidth, y, line });
+
+      // Only the first line takes the first-line offset.
+      const offset = i === 0 ? firstLine : 0;
+      items.push({
+        kind: 'line',
+        x: geometry.margin + indent + markerWidth + reserve + offset,
+        y,
+        line,
+      });
       y -= lineHeight - size;
     }
 
-    // A little air after a heading, so it binds to the text below it.
     if (block.kind === 'heading' && blocks[index + 1]) y -= size * 0.25;
   }
 

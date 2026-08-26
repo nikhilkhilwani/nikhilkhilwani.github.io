@@ -14,7 +14,7 @@
  * passwordStrength() is pure and covered by scripts/test-tools.mjs.
  */
 
-import { openPdfDocument, SourceEncrypted } from './pdflib.ts';
+import { openPdfDocument } from './pdflib.ts';
 
 // Re-exported so pages can import the whole PDF-security surface from here.
 export { SourceEncrypted, loadPdfLib, classifyPasswordError, inspectEncryption, openPdfDocument } from './pdflib.ts';

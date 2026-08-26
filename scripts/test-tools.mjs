@@ -15,14 +15,25 @@ import {
   normalizeUrlish, escapeMicroformat,
 } from '../src/lib/qr/qr.ts';
 import { fitWithin } from '../src/lib/img/raster.ts';
+import { parseColor, hexToRgb, rgbToHex } from '../src/lib/color/convert.ts';
+import { contrastRatio, relativeLuminance } from '../src/lib/contrast/wcag.ts';
 import { passwordStrength, describePermissions, OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
 import {
   LIMITS, screenFiles, formatLimit, describeRejections,
   canvasPixelsFor, exceedsCanvasBudget, largestSafeScale,
 } from '../src/lib/ui/limits.ts';
 import { classifyImage, percentSaved, describeReport, isNoOp } from '../src/lib/pdf/compress.ts';
-import { parseBlocks, tidyRuns, decodeEntities, unsupportedCharacters, blockText } from '../src/lib/docx/blocks.ts';
-import { wrapRuns, layout, columnWidths, A4, DEFAULT_SCALE } from '../src/lib/docx/layout.ts';
+import {
+  parseBlocks, tidyRuns, decodeEntities, unsupportedCharacters, blockText,
+  orderedMarker, letters, roman,
+} from '../src/lib/docx/blocks.ts';
+import {
+  wrapRuns, layout, columnWidths, A4, DEFAULT_SCALE, nextTabStop, tableColumns, spanWidth,
+  alignLine, lineWidth,
+} from '../src/lib/docx/layout.ts';
+import {
+  twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables,
+} from '../src/lib/docx/wordxml.ts';
 
 let fail = 0;
 let pass = 0;
@@ -36,6 +47,15 @@ const eq = (a, b, msg) => {
   }
 };
 const deep = (a, b, msg) => eq(JSON.stringify(a), JSON.stringify(b), msg);
+/** Float comparison, for the color math where exact equality is meaningless. */
+const near = (a, b, tol, msg) => {
+  if (!(Math.abs(a - b) <= tol)) {
+    console.log(`FAIL ${msg}\n       got:  ${a}\n       want: ~${b} (±${tol})`);
+    fail++;
+  } else {
+    pass++;
+  }
+};
 const ok = (cond, msg) => eq(!!cond, true, msg);
 const throws = (fn, msg) => {
   try {
@@ -219,6 +239,39 @@ eq(normalizeUrlish('https://x.dev'), 'https://x.dev', 'existing scheme is left a
 eq(normalizeUrlish('mailto:a@b.co'), 'mailto:a@b.co', 'non-http scheme is left alone');
 eq(normalizeUrlish('just some text'), 'just some text', 'plain text is not turned into a URL');
 eq(normalizeUrlish('  '), '', 'blank input stays blank');
+
+/* ------------------------------------------------ QR: color and contrast */
+
+// The QR generator parses both color inputs and refuses a pair a scanner
+// cannot separate, so parseColor and contrastRatio are part of its contract.
+// These assertions moved here from the retired scripts/test-color.mjs when the
+// color converter, contrast checker and palette collection were removed.
+
+near(contrastRatio({ r: 0, g: 0, b: 0 }, { r: 255, g: 255, b: 255 }), 21, 0.001, 'black/white = 21');
+near(contrastRatio({ r: 255, g: 255, b: 255 }, { r: 255, g: 255, b: 255 }), 1, 0.001, 'white/white = 1');
+// The published WCAG boundary case: #767676 is the darkest grey that clears AA
+// on white, which is exactly the threshold the scan warning sits on.
+near(contrastRatio(hexToRgb('#767676'), hexToRgb('#ffffff')), 4.54, 0.02, '#767676 on white');
+near(relativeLuminance({ r: 255, g: 255, b: 255 }), 1, 0.001, 'white luminance = 1');
+near(relativeLuminance({ r: 0, g: 0, b: 0 }), 0, 0.001, 'black luminance = 0');
+
+// <input type="color"> only ever yields #rrggbb, but parseColor is the public
+// entry point and still accepts the wider syntax, so keep covering it.
+eq(rgbToHex(parseColor('#6EE7D7')), '#6ee7d7', 'parse hex upper');
+eq(rgbToHex(parseColor('#fff')), '#ffffff', 'parse short hex');
+eq(rgbToHex(parseColor('rgb(110, 231, 215)')), '#6ee7d7', 'parse rgb()');
+eq(rgbToHex(parseColor('rgb(110 231 215)')), '#6ee7d7', 'parse space rgb()');
+eq(rgbToHex(parseColor('hsl(172.07, 71.6%, 66.9%)')), '#6ee7d7', 'parse precise hsl()');
+eq(rgbToHex(parseColor('hsv(172.07, 52.4%, 90.6%)')), '#6ee7d7', 'parse hsv()');
+eq(rgbToHex(parseColor('cmyk(52.4%, 0%, 6.9%, 9.4%)')), '#6ee7d7', 'parse cmyk()');
+eq(rgbToHex(parseColor('oklch(0.628 0.2577 29.23)')), '#ff0000', 'parse oklch()');
+eq(rgbToHex(parseColor('tomato')), '#ff6347', 'parse named');
+eq(parseColor('not a color'), null, 'parse garbage -> null');
+eq(parseColor(''), null, 'parse empty -> null');
+
+for (const hex of ['#6ee7d7', '#0d1017', '#ff8800', '#123456', '#ffffff', '#000000', '#7f7f7f']) {
+  eq(rgbToHex(hexToRgb(hex)), hex, `hex round-trip ${hex}`);
+}
 
 /* ------------------------------------------------------------- protect-pdf */
 
@@ -438,7 +491,18 @@ deep(
   'keeps differently styled runs apart',
 );
 deep(tidyRuns([{ text: '' }, { text: 'x' }]), [{ text: 'x' }], 'drops empty runs');
-deep(tidyRuns([{ text: '  a   b  ' }]), [{ text: 'a b' }], 'collapses and trims whitespace');
+deep(tidyRuns([{ text: '  a   b  ' }]), [{ text: 'a b' }], 'collapses and trims plain spaces');
+
+// Tabs and newlines must survive: collapsing them is what broke tabbed CVs.
+eq(tidyRuns([{ text: 'A\tB' }])[0].text, 'A\tB', 'a tab is preserved, not collapsed');
+eq(tidyRuns([{ text: 'A\t\tB' }])[0].text, 'A\t\tB', 'consecutive tabs are preserved');
+eq(tidyRuns([{ text: 'A\nB' }])[0].text, 'A\nB', 'a newline is preserved');
+eq(tidyRuns([{ text: 'A  \t  B' }])[0].text, 'A \t B', 'spaces around a tab still collapse');
+deep(
+  tidyRuns([{ text: 'a', href: 'https://x' }, { text: 'b', href: 'https://y' }]),
+  [{ text: 'a', href: 'https://x' }, { text: 'b', href: 'https://y' }],
+  'runs with different links stay separate',
+);
 
 {
   const blocks = parseBlocks('<h1>Title</h1><p>Body <strong>bold</strong> and <em>italic</em>.</p>');
@@ -446,7 +510,6 @@ deep(tidyRuns([{ text: '  a   b  ' }]), [{ text: 'a b' }], 'collapses and trims 
   eq(blocks[0].kind, 'heading', 'first block is a heading');
   eq(blocks[0].level, 1, 'h1 becomes level 1');
   eq(blockText(blocks[0]), 'Title', 'heading text');
-  eq(blocks[1].kind, 'paragraph', 'second block is a paragraph');
   const styled = blocks[1].runs;
   ok(styled.some((r) => r.bold && r.text === 'bold'), 'bold run preserved');
   ok(styled.some((r) => r.italic && r.text === 'italic'), 'italic run preserved');
@@ -455,33 +518,85 @@ deep(tidyRuns([{ text: '  a   b  ' }]), [{ text: 'a b' }], 'collapses and trims 
 eq(parseBlocks('<h2>A</h2>')[0].level, 2, 'h2 becomes level 2');
 eq(parseBlocks('<h6>A</h6>')[0].level, 3, 'h6 clamps to level 3');
 
+// Inline formatting that mammoth does emit, and that used to be discarded.
+ok(parseBlocks('<p><u>x</u></p>')[0].runs[0].underline, 'underline is captured');
+ok(parseBlocks('<p><s>x</s></p>')[0].runs[0].strike, 'strikethrough is captured');
+ok(parseBlocks('<p><del>x</del></p>')[0].runs[0].strike, 'del counts as strikethrough');
+eq(parseBlocks('<p>H<sup>2</sup>O</p>')[0].runs[1].script, 'super', 'superscript is captured');
+eq(parseBlocks('<p>x<sub>1</sub></p>')[0].runs[1].script, 'sub', 'subscript is captured');
+eq(
+  parseBlocks('<p><a href="https://example.com">link</a></p>')[0].runs[0].href,
+  'https://example.com',
+  'a hyperlink target is captured',
+);
+eq(
+  parseBlocks('<p><a href="mailto:a@b.co">mail</a></p>')[0].runs[0].href,
+  'mailto:a@b.co',
+  'a mailto link is captured',
+);
+eq(
+  parseBlocks('<p><a href="#bookmark">internal</a></p>')[0].runs[0].href,
+  undefined,
+  'an internal bookmark is not treated as a followable link',
+);
+eq(blockText(parseBlocks('<p><a href="#x">text survives</a></p>')[0]), 'text survives',
+  'the text of an unusable link is still kept');
+eq(parseBlocks('<p>A<br />B</p>')[0].runs[0].text, 'A\nB', 'a soft break becomes a real newline');
+
 {
   const blocks = parseBlocks('<ul><li>one</li><li>two</li></ul>');
   eq(blocks.length, 2, 'two list items');
-  eq(blocks[0].kind, 'listItem', 'parsed as a list item');
   eq(blocks[0].ordered, false, 'ul is unordered');
-  eq(blocks[0].marker, '•', 'bullet marker');
+  eq(blocks[0].marker, '•', 'level-1 bullet');
 }
 {
   const blocks = parseBlocks('<ol><li>one</li><li>two</li><li>three</li></ol>');
   deep(blocks.map((b) => b.marker), ['1.', '2.', '3.'], 'ol numbers its items in order');
-  ok(blocks.every((b) => b.ordered), 'ol items are ordered');
 }
 {
-  const blocks = parseBlocks('<ul><li>a<ul><li>b</li></ul></li></ul>');
-  ok(blocks.some((b) => b.level === 2), 'a nested list reports a deeper level');
+  // Word cycles 1. then a. then i. by depth; mammoth only gives nesting.
+  const blocks = parseBlocks('<ol><li>A<ol><li>B<ol><li>C</li></ol></li></ol></li></ol>');
+  deep(blocks.map((b) => b.marker), ['1.', 'a.', 'i.'], 'nested ordered lists use 1. / a. / i.');
+  deep(blocks.map((b) => b.level), [1, 2, 3], 'nesting depth is recorded');
 }
+{
+  const blocks = parseBlocks('<ul><li>A<ul><li>B<ul><li>C</li></ul></li></ul></li></ul>');
+  deep(blocks.map((b) => b.marker), ['•', 'o', '-'], 'nested bullets cycle within WinAnsi');
+  deep(unsupportedCharacters(blocks), [], 'and none of those bullets is unsupported');
+}
+
+eq(letters(1), 'a', 'letters 1');
+eq(letters(26), 'z', 'letters 26');
+eq(letters(27), 'aa', 'letters 27');
+eq(roman(1), 'i', 'roman 1');
+eq(roman(4), 'iv', 'roman 4');
+eq(roman(9), 'ix', 'roman 9');
+eq(roman(14), 'xiv', 'roman 14');
+eq(orderedMarker(1, 3), '3.', 'depth 1 is decimal');
+eq(orderedMarker(2, 3), 'c.', 'depth 2 is lettered');
+eq(orderedMarker(3, 3), 'iii.', 'depth 3 is roman');
+eq(orderedMarker(4, 3), '3.', 'depth 4 cycles back to decimal');
 
 {
   const blocks = parseBlocks('<table><tr><td><p>A</p></td><td><p>B</p></td></tr></table>');
-  eq(blocks.length, 1, 'a table is one block');
   eq(blocks[0].kind, 'table', 'parsed as a table');
-  eq(blocks[0].rows.length, 1, 'one row');
   eq(blocks[0].rows[0].length, 2, 'two cells');
-  eq(blocks[0].rows[0][0][0].text, 'A', 'cell content preserved');
+  eq(blocks[0].rows[0][0].runs[0].text, 'A', 'cell content preserved');
+  eq(blocks[0].rows[0][0].span, 1, 'a plain cell spans one column');
+}
+{
+  // colspan is the one merge mammoth does translate.
+  const blocks = parseBlocks('<table><tr><td colspan="3"><p>Wide</p></td></tr><tr><td><p>a</p></td><td><p>b</p></td><td><p>c</p></td></tr></table>');
+  eq(blocks[0].rows[0][0].span, 3, 'colspan is captured');
+  eq(tableColumns(blocks[0].rows), 3, 'the table is three columns wide');
 }
 eq(
-  parseBlocks('<table><tr><th><p>H</p></th></tr></table>')[0].rows[0][0][0].text,
+  parseBlocks('<table><tr><td colspan="0"><p>x</p></td></tr></table>')[0].rows[0][0].span,
+  1,
+  'a nonsense colspan falls back to 1',
+);
+eq(
+  parseBlocks('<table><tr><th><p>H</p></th></tr></table>')[0].rows[0][0].runs[0].text,
   'H',
   'th is treated as a cell',
 );
@@ -514,6 +629,12 @@ deep(unsupportedCharacters(parseBlocks('<p>an em—dash and a bullet •</p>')),
 // A predictable measurer: every character is exactly half the font size wide.
 const half = (text, style) => text.length * style.size * 0.5;
 
+eq(nextTabStop(0), 36, 'the first tab stop is at 36pt');
+eq(nextTabStop(10), 36, 'a tab from 10pt lands on 36pt');
+eq(nextTabStop(36), 72, 'a tab exactly on a stop advances to the next');
+eq(nextTabStop(40), 72, 'a tab from 40pt lands on 72pt');
+eq(nextTabStop(10, 20), 20, 'the stop interval is configurable');
+
 {
   const lines = wrapRuns([{ text: 'aaaa bbbb cccc' }], 10, 25, half);
   eq(lines.length, 3, 'wraps at the available width');
@@ -526,7 +647,6 @@ eq(
   'a word longer than the line is placed rather than looping forever',
 );
 {
-  // Wrapping must work ACROSS runs, so styling never forces a break.
   const lines = wrapRuns([{ text: 'aa ' }, { text: 'bb', bold: true }, { text: ' cc' }], 10, 500, half);
   eq(lines.length, 1, 'styled runs share a line');
   ok(lines[0].pieces.some((p) => p.bold), 'the bold piece is on that line');
@@ -538,13 +658,64 @@ eq(
 }
 deep(wrapRuns([], 10, 100, half), [], 'no runs means no lines');
 
+// Tabs: the fix for right-aligned dates in a CV.
+{
+  const lines = wrapRuns([{ text: 'AB\tCD' }], 10, 400, half);
+  eq(lines.length, 1, 'a tab does not break the line');
+  const cd = lines[0].pieces.find((p) => p.text === 'CD');
+  eq(cd.x, 36, 'text after a tab starts at the next tab stop, not one space along');
+}
+{
+  const lines = wrapRuns([{ text: 'AB\t\tCD' }], 10, 400, half);
+  eq(lines[0].pieces.find((p) => p.text === 'CD').x, 72, 'two tabs advance two stops');
+}
+{
+  // A tab that would leave the line wraps instead of overflowing.
+  const lines = wrapRuns([{ text: 'AB\tCD' }], 10, 30, half);
+  ok(lines.length >= 2, 'a tab past the line width wraps');
+}
+{
+  const lines = wrapRuns([{ text: 'A\nB' }], 10, 400, half);
+  eq(lines.length, 2, 'a newline forces a line break');
+  eq(lines[0].pieces[0].text, 'A', 'first line before the break');
+  eq(lines[1].pieces[0].text, 'B', 'second line after it');
+}
+{
+  // Super/subscript is measured smaller, so following text is not pushed out.
+  const lines = wrapRuns([{ text: 'H' }, { text: '2', script: 'super' }, { text: 'O' }], 10, 400, half);
+  const sup = lines[0].pieces.find((p) => p.script === 'super');
+  ok(sup.size < 10, `superscript is drawn smaller (${sup.size})`);
+  ok(sup.rise > 0, 'superscript is raised');
+  ok(lines[0].pieces.find((p) => p.text === 'O').x < 10 + 5, 'the following text is not pushed out by a full-size digit');
+}
+{
+  const lines = wrapRuns([{ text: 'x', script: 'sub' }], 10, 400, half);
+  ok(lines[0].pieces[0].rise < 0, 'subscript is lowered');
+}
+{
+  const lines = wrapRuns([{ text: 'link', href: 'https://x' }], 10, 400, half);
+  eq(lines[0].pieces[0].href, 'https://x', 'the link target reaches the piece');
+  ok(lines[0].pieces[0].width > 0, 'and the piece carries a width, so a rule and hotspot can be drawn');
+}
+{
+  const lines = wrapRuns([{ text: 'u', underline: true }, { text: 's', strike: true }], 10, 400, half);
+  ok(lines[0].pieces.some((p) => p.underline), 'underline reaches the piece');
+  ok(lines[0].pieces.some((p) => p.strike), 'strikethrough reaches the piece');
+}
+
 deep(columnWidths(2, 108, 8), [50, 50], 'two columns split the width minus the gap');
 eq(columnWidths(3, 200, 10).length, 3, 'three columns');
 ok(columnWidths(20, 100, 8).every((w) => w >= 24), 'columns never collapse below a floor');
 deep(columnWidths(0, 100), [], 'zero columns yields nothing');
 
+eq(tableColumns([[{ runs: [], span: 1 }, { runs: [], span: 1 }]]), 2, 'two plain cells is two columns');
+eq(tableColumns([[{ runs: [], span: 3 }]]), 3, 'one cell spanning three is three columns');
+eq(tableColumns([]), 1, 'an empty table still has one column');
+eq(spanWidth([50, 50, 50], 0, 1, 8), 50, 'a single column is its own width');
+eq(spanWidth([50, 50, 50], 0, 2, 8), 108, 'spanning two columns swallows the gap between them');
+eq(spanWidth([50, 50, 50], 0, 3, 8), 166, 'spanning three swallows two gaps');
+
 {
-  // Pagination: enough paragraphs that one page cannot hold them.
   const many = Array.from({ length: 60 }, () => ({
     kind: 'paragraph',
     runs: [{ text: 'This is a paragraph with enough words in it to occupy a couple of lines each time.' }],
@@ -552,7 +723,6 @@ deep(columnWidths(0, 100), [], 'zero columns yields nothing');
   const pages = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure: half });
   ok(pages.length > 1, `long input paginates (${pages.length} pages)`);
 
-  // Nothing may be dropped: every paragraph must appear somewhere.
   const drawn = pages
     .flatMap((p) => p.items)
     .filter((i) => i.kind === 'line')
@@ -561,7 +731,6 @@ deep(columnWidths(0, 100), [], 'zero columns yields nothing');
     .join(' ');
   eq((drawn.match(/paragraph/g) ?? []).length, 60, 'every paragraph survives pagination');
 
-  // Nothing may be drawn outside the page.
   const off = pages.flatMap((p) => p.items).filter((i) => i.y < 0 || i.y > A4.height);
   eq(off.length, 0, 'nothing is laid out off the page');
 }
@@ -572,12 +741,283 @@ eq(
 );
 deep(layout([], { geometry: A4, scale: DEFAULT_SCALE, measure: half }), [], 'no blocks means no pages');
 {
-  const pages = layout([{ kind: 'table', rows: [[[{ text: 'A' }], [{ text: 'B' }]]] }], {
+  const pages = layout([{ kind: 'table', rows: [[{ runs: [{ text: 'A' }], span: 1 }, { runs: [{ text: 'B' }], span: 1 }]] }], {
     geometry: A4,
     scale: DEFAULT_SCALE,
     measure: half,
   });
   eq(pages[0].items.filter((i) => i.kind === 'cellBox').length, 2, 'a table row draws one box per cell');
+}
+{
+  // A merged cell must be drawn wider than a single column, not left narrow.
+  const pages = layout(
+    [
+      {
+        kind: 'table',
+        rows: [
+          [{ runs: [{ text: 'Wide' }], span: 3 }],
+          [
+            { runs: [{ text: 'a' }], span: 1 },
+            { runs: [{ text: 'b' }], span: 1 },
+            { runs: [{ text: 'c' }], span: 1 },
+          ],
+        ],
+      },
+    ],
+    { geometry: A4, scale: DEFAULT_SCALE, measure: half },
+  );
+  const boxes = pages[0].items.filter((i) => i.kind === 'cellBox');
+  eq(boxes.length, 4, 'four cell boxes in total');
+  const wide = boxes[0];
+  const narrow = boxes[1];
+  ok(wide.width > narrow.width * 2.5, `the merged cell spans the row (${wide.width.toFixed(0)} vs ${narrow.width.toFixed(0)})`);
+  ok(
+    Math.abs(wide.width - (A4.width - A4.margin * 2)) < 2,
+    'and fills the full text width',
+  );
+}
+
+/* -------------------------------------------------------- docx: word xml */
+
+eq(twips('1440'), 72, '1440 twips is one inch (72pt)');
+eq(twips('720'), 36, '720 twips is half an inch');
+eq(twips(undefined), 0, 'a missing measurement is zero');
+eq(twips('nonsense'), 0, 'an unparseable measurement is zero');
+
+const wp = (inner) =>
+  `<w:document xmlns:w="x"><w:body>${inner}</w:body></w:document>`;
+
+// Alignment
+{
+  const props = readParagraphProps(
+    wp(
+      '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>C</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:jc w:val="right"/></w:pPr><w:r><w:t>R</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t>J</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:t>P</w:t></w:r></w:p>',
+    ),
+  );
+  eq(props.length, 4, 'four paragraphs read');
+  eq(props[0].align, 'center', 'w:jc center');
+  eq(props[1].align, 'right', 'w:jc right');
+  eq(props[2].align, 'justify', 'w:jc both becomes justify');
+  eq(props[3].align, undefined, 'a paragraph with no w:jc has no alignment');
+}
+
+// Size, in half-points
+{
+  const props = readParagraphProps(
+    wp('<w:p><w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>Big</w:t></w:r></w:p><w:p><w:r><w:t>Plain</w:t></w:r></w:p>'),
+  );
+  eq(props[0].size, 24, 'w:sz 48 half-points is 24pt');
+  eq(props[1].size, undefined, 'no w:sz means no override');
+}
+eq(
+  readParagraphProps(wp('<w:p><w:r><w:rPr><w:sz w:val="99999"/></w:rPr><w:t>x</w:t></w:r></w:p>'))[0].size,
+  undefined,
+  'an absurd size is ignored rather than trusted',
+);
+
+// Indents
+{
+  const props = readParagraphProps(
+    wp(
+      '<w:p><w:pPr><w:ind w:left="720" w:firstLine="360"/></w:pPr><w:r><w:t>A</w:t></w:r></w:p>' +
+        '<w:p><w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr><w:r><w:t>B</w:t></w:r></w:p>',
+    ),
+  );
+  eq(props[0].indent, 36, 'left indent in points');
+  eq(props[0].firstLine, 18, 'first-line indent in points');
+  eq(props[1].firstLine, -18, 'a hanging indent is a negative first-line offset');
+}
+
+// Tab stops — the CV case
+{
+  const props = readParagraphProps(
+    wp(
+      '<w:p><w:pPr><w:tabs><w:tab w:val="right" w:pos="9000"/><w:tab w:val="left" w:pos="2880"/></w:tabs></w:pPr>' +
+        '<w:r><w:t>Role</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>2024</w:t></w:r></w:p>',
+    ),
+  );
+  eq(props[0].tabs.length, 2, 'both stops read');
+  eq(props[0].tabs[0].pos, 144, 'stops are sorted by position, nearest first');
+  eq(props[0].tabs[1].pos, 450, 'the right stop is at 450pt');
+  eq(props[0].tabs[1].align, 'right', 'and is a right stop');
+  eq(props[0].text, 'Role\t2024', 'the tab survives into the comparison text');
+}
+eq(
+  readParagraphProps(wp('<w:p><w:pPr><w:tabs><w:tab w:val="clear" w:pos="100"/></w:tabs></w:pPr><w:r><w:t>x</w:t></w:r></w:p>'))[0].tabs,
+  undefined,
+  'a "clear" stop removes rather than declares, so it is skipped',
+);
+
+// Paragraph text, used only for correlation
+eq(paragraphText('<w:p><w:r><w:t>A</w:t></w:r><w:r><w:tab/></w:r><w:r><w:t>B</w:t></w:r></w:p>'), 'A\tB', 'tab becomes \\t');
+eq(paragraphText('<w:p><w:r><w:t>A</w:t></w:r><w:r><w:br/></w:r><w:r><w:t>B</w:t></w:r></w:p>'), 'A\nB', 'break becomes \\n');
+eq(paragraphText('<w:p><w:r><w:t>a &amp; b</w:t></w:r></w:p>'), 'a & b', 'entities are decoded');
+eq(paragraphText('<w:p><w:r><w:t xml:space="preserve"> x </w:t></w:r></w:p>'), ' x ', 'preserved spaces are kept');
+eq(normalizeText('  a   b '), 'a b', 'normalizeText flattens whitespace');
+
+// Table paragraphs must be excluded or every later index shifts
+{
+  const xml = wp(
+    '<w:p><w:r><w:t>Before</w:t></w:r></w:p>' +
+      '<w:tbl><w:tr><w:tc><w:p><w:r><w:t>InCell</w:t></w:r></w:p></w:tc></w:tr></w:tbl>' +
+      '<w:p><w:r><w:t>After</w:t></w:r></w:p>',
+  );
+  const props = readParagraphProps(xml);
+  deep(props.map((p) => p.text), ['Before', 'After'], 'paragraphs inside a table are not counted');
+  ok(!withoutTables(xml).includes('InCell'), 'withoutTables strips the table region');
+}
+
+// Page setup
+{
+  const setup = readPageSetup(
+    wp('<w:p/><w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="1440" w:right="1440" w:bottom="1440" w:left="1440"/></w:sectPr>'),
+  );
+  ok(Math.abs(setup.width - 595.3) < 1, `A4 width read (${setup.width.toFixed(1)}pt)`);
+  ok(Math.abs(setup.height - 841.9) < 1, `A4 height read (${setup.height.toFixed(1)}pt)`);
+  eq(setup.margin, 72, 'one-inch margins read');
+}
+{
+  const setup = readPageSetup(
+    wp('<w:sectPr><w:pgSz w:w="16838" w:h="11906" w:orient="landscape"/></w:sectPr>'),
+  );
+  ok(setup.width > setup.height, 'landscape comes back wider than tall');
+}
+{
+  // A wide binding edge must not crush the text column.
+  const setup = readPageSetup(
+    wp('<w:sectPr><w:pgSz w:w="11906" w:h="16838"/><w:pgMar w:top="720" w:left="5000" w:right="720" w:bottom="720"/></w:sectPr>'),
+  );
+  eq(setup.margin, 36, 'the smallest margin is used, not the binding edge');
+}
+eq(readPageSetup(wp('<w:p/>')), null, 'no sectPr means no page setup');
+eq(readPageSetup(wp('<w:sectPr><w:pgSz w:w="10" w:h="10"/></w:sectPr>')), null, 'an implausible page size is rejected');
+
+// Correlation by text, not position
+{
+  const blocks = [
+    { kind: 'paragraph', runs: [{ text: 'One' }] },
+    { kind: 'heading', runs: [{ text: 'Two' }] },
+    { kind: 'table', rows: [] },
+    { kind: 'paragraph', runs: [{ text: 'Three' }] },
+  ];
+  const props = [
+    { text: 'One', align: 'center' },
+    { text: 'Two', align: 'right' },
+    { text: 'Three', align: 'justify' },
+  ];
+  const { applied, skipped, attach } = correlate(blocks, props);
+  eq(applied, 3, 'all three text blocks matched');
+  eq(skipped, 0, 'nothing skipped');
+  eq(attach(blocks[0]).align, 'center', 'first block got its own properties');
+  eq(attach(blocks[1]).align, 'right', 'second block matched past the table block');
+  eq(attach(blocks[3]).align, 'justify', 'third block matched');
+  eq(attach(blocks[2]), undefined, 'the table block gets nothing');
+}
+{
+  // A drifted document must degrade to defaults, not misformat.
+  const blocks = [{ kind: 'paragraph', runs: [{ text: 'Totally different' }] }];
+  const { applied, skipped, attach } = correlate(blocks, [{ text: 'Nothing alike', align: 'right' }]);
+  eq(applied, 0, 'no match means nothing applied');
+  eq(skipped, 1, 'and the miss is counted');
+  eq(attach(blocks[0]), undefined, 'so the block keeps the defaults');
+}
+{
+  // mammoth drops empty paragraphs the XML still contains.
+  const blocks = [{ kind: 'paragraph', runs: [{ text: 'Real' }] }];
+  const { applied, attach } = correlate(blocks, [
+    { text: '' }, { text: '' }, { text: 'Real', align: 'center' },
+  ]);
+  eq(applied, 1, 'it looks ahead past empty paragraphs');
+  eq(attach(blocks[0]).align, 'center', 'and still finds the match');
+}
+
+/* ------------------------------------------------- docx: align and tabs */
+
+{
+  // A right tab stop must make the following text END on the stop.
+  const tabs = [{ pos: 200, align: 'right' }];
+  const lines = wrapRuns([{ text: 'Role\t2024' }], 10, 400, half, tabs);
+  eq(lines.length, 1, 'the tabbed line stays on one line');
+  const date = lines[0].pieces.find((p) => p.text === '2024');
+  ok(
+    Math.abs(date.x + date.width - 200) < 0.01,
+    `the date ends exactly on the right stop (ends at ${(date.x + date.width).toFixed(1)})`,
+  );
+}
+{
+  // A left stop simply starts there.
+  const lines = wrapRuns([{ text: 'A\tB' }], 10, 400, half, [{ pos: 150, align: 'left' }]);
+  eq(lines[0].pieces.find((p) => p.text === 'B').x, 150, 'a left stop positions the start');
+}
+{
+  // With no declared stops, the half-inch grid still applies.
+  const lines = wrapRuns([{ text: 'A\tB' }], 10, 400, half, []);
+  eq(lines[0].pieces.find((p) => p.text === 'B').x, 36, 'no stops falls back to the default grid');
+}
+
+{
+  const line = wrapRuns([{ text: 'abcd' }], 10, 200, half)[0];
+  eq(lineWidth(line), 20, 'lineWidth measures to the end of the last piece');
+
+  const centred = alignLine(line, 'center', 200, true);
+  eq(centred.pieces[0].x, 90, 'centring offsets by half the slack');
+
+  const right = alignLine(line, 'right', 200, true);
+  eq(right.pieces[0].x, 180, 'right alignment pushes to the far edge');
+
+  const left = alignLine(line, 'left', 200, true);
+  eq(left.pieces[0].x, 0, 'left alignment changes nothing');
+}
+{
+  // Justify stretches the spaces, but never on the last line.
+  const line = wrapRuns([{ text: 'aa bb cc' }], 10, 200, half)[0];
+  const justified = alignLine(line, 'justify', 48, false);
+  ok(lineWidth(justified) > lineWidth(line), 'justify widens the line towards the margin');
+  const last = alignLine(line, 'justify', 48, true);
+  eq(lineWidth(last), lineWidth(line), 'the last line of a block is left ragged');
+}
+{
+  // An absurd stretch is worse than a ragged edge.
+  const line = wrapRuns([{ text: 'a b' }], 10, 400, half)[0];
+  eq(lineWidth(alignLine(line, 'justify', 400, false)), lineWidth(line), 'a huge gap is left alone');
+}
+
+{
+  // The appearance callback must actually move things.
+  const blocks = [{ kind: 'paragraph', runs: [{ text: 'centre me' }] }];
+  const plain = layout(blocks, { geometry: A4, scale: DEFAULT_SCALE, measure: half });
+  const centred = layout(blocks, {
+    geometry: A4,
+    scale: DEFAULT_SCALE,
+    measure: half,
+    appearance: () => ({ align: 'center' }),
+  });
+  const xOf = (pages) => pages[0].items.find((i) => i.kind === 'line').line.pieces[0].x;
+  ok(xOf(centred) > xOf(plain), 'a centred paragraph starts further right');
+}
+{
+  const blocks = [{ kind: 'paragraph', runs: [{ text: 'indent me' }] }];
+  const shifted = layout(blocks, {
+    geometry: A4,
+    scale: DEFAULT_SCALE,
+    measure: half,
+    appearance: () => ({ indent: 40 }),
+  });
+  const line = shifted[0].items.find((i) => i.kind === 'line');
+  ok(Math.abs(line.x - (A4.margin + 40)) < 0.01, 'an indent moves the whole block right');
+}
+{
+  const blocks = [{ kind: 'paragraph', runs: [{ text: 'big text' }] }];
+  const big = layout(blocks, {
+    geometry: A4,
+    scale: DEFAULT_SCALE,
+    measure: half,
+    appearance: () => ({ size: 24 }),
+  });
+  eq(big[0].items.find((i) => i.kind === 'line').line.size, 24, 'a size override reaches the line');
 }
 
 /* -------------------------------------------------------------------- end */

@@ -16,7 +16,6 @@ npm run preview    # serve the built dist/
 npm run check      # astro + TypeScript diagnostics
 npm test           # pure logic, plus PDF encryption verified against pdf.js
 npm run verify     # check + test + build + built-page contract check
-npm run palettes   # regenerate src/data/palettes.ts
 npm run sync:pdfjs # copy pdf.js runtime assets into public/ (runs on build)
 ```
 
@@ -26,15 +25,14 @@ npm run sync:pdfjs # copy pdf.js runtime assets into public/ (runs on build)
 src/
   data/
     tools.ts         single source of truth for the tools index, switcher, sitemap
-    palettes.ts      GENERATED — see scripts/gen-palettes.mjs
   layouts/
     BaseLayout.astro head/SEO/header/footer shell
     ToolLayout.astro per-tool chrome: breadcrumb, title, tool switcher
   components/
     Dropzone.astro   file picker + drag-drop + paste surface
   lib/
-    color/convert.ts sRGB / HSL / HSV / CMYK / OKLCH conversion + parsing
-    contrast/wcag.ts WCAG 2.1 luminance, ratio, compliance, auto-fix
+    color/convert.ts color parsing into sRGB (used by the QR generator)
+    contrast/wcag.ts WCAG 2.1 luminance + contrast ratio
     img/raster.ts    canvas decode/resize/encode for the image tools
     pdf/pdfjs.ts     lazy pdf.js loader, asset paths, password handling
     qr/qr.ts         QR matrix, SVG/canvas rendering, WiFi/vCard payloads
@@ -50,15 +48,14 @@ src/
     docx/blocks.ts   mammoth HTML -> block model (pure, no DOM)
     docx/layout.ts   line breaking, pagination, tables (pure, injected measurer)
     docx/topdf.ts    .docx -> PDF, tying mammoth + layout + pdf-lib together
+    docx/wordxml.ts  reads the appearance mammoth discards, straight from the XML
   pages/
     index.astro      landing page
     tools/           one file per tool — the URL is the filename
     sitemap.xml.ts   generated from tools.ts, excludes coming-soon entries
 scripts/
-  gen-palettes.mjs   seeded OKLCH palette generator
   sync-pdfjs.mjs     copies pdf.js CMaps/fonts/wasm into public/pdfjs
-  test-color.mjs     assertions for the color + contrast math
-  test-tools.mjs     assertions for files, raster, QR, limits, and compression logic
+  test-tools.mjs     assertions for files, raster, QR, color, limits, compression, docx
   test-pdf.mjs       encryption, compression and .docx→PDF verified with pdf.js (runs in CI)
   test-dom.mjs       checks built HTML against the JS that drives it
 public/
@@ -73,7 +70,7 @@ public/
 The index grid, the tool switcher, and the sitemap all pick it up automatically.
 
 Keep heavy dependencies inside the page that needs them (`import()` inside the tool's
-`<script>`), so a color tool never ships a PDF library.
+`<script>`), so the QR generator never ships a PDF library.
 
 ## Deployment
 
@@ -87,10 +84,9 @@ Without that, Pages keeps serving the old root `index.html` from the branch and 
 
 - `build.sourcemap` is off on purpose. Shipping sourcemaps publishes your original source
   alongside the bundle.
-- Palette data is generated from a seeded PRNG, so re-running `npm run palettes` reproduces the
-  same 132 palettes. Change the seed in `scripts/gen-palettes.mjs` to get a different set.
-- The color and contrast math is checked against published reference values (Ottosson's OKLab
-  figures, and known WCAG pairs such as `#767676` on white = 4.54). Run `npm test`.
+- The colour parsing and WCAG math that survive in `lib/color` and `lib/contrast` exist only for
+  the QR generator, which refuses a foreground/background pair a scanner cannot separate. They are
+  still checked against known WCAG pairs (`#767676` on white = 4.54). Run `npm test`.
 - `scripts/test-dom.mjs` runs against `dist/` after a build. The tool pages talk to their markup
   by id, which TypeScript cannot check, so it verifies that every id-shaped string literal in a
   page's own JavaScript matches an id in that page's HTML — plus id uniqueness and that every
@@ -114,21 +110,39 @@ Without that, Pages keeps serving the old root `index.html` from the branch and 
   code path runs under canvas in the browser and under sharp in `scripts/test-pdf.mjs`. That is
   what lets CI verify the promise that recompression leaves text byte-identical.
 - Word→PDF keeps the text as real text rather than rasterising, so it stays selectable and
-  searchable. It is not a Word layout engine: line and page breaks will not match Word, because
-  Word measures with Calibri and Cambria and neither can be redistributed. The page says so.
+  searchable. It is not a Word layout engine: line breaks will not match Word, because Word
+  measures with Calibri and Cambria and neither can be redistributed. Font colours, highlighting,
+  headers, footers, footnotes, explicit page breaks, columns and vertically merged cells are not
+  carried over either, and a paragraph mixing sizes takes its first size. The page says all of
+  this rather than implying a visual clone.
 - The built-in PDF fonts are WinAnsi only, so Latin-1 accents work but CJK, Devanagari and Arabic
   do not. Those characters are detected up front and reported, never dropped in silence. Shipping
   an OFL Unicode TTF would fix it — Fontsource only publishes woff2, which fontkit cannot embed.
 - `docx/blocks.ts` treats unknown tags as transparent AND turns stray text into a paragraph.
   Losing content without a trace is the worst failure a document converter can have.
+- Word→PDF reads appearance from `word/document.xml` itself, because mammoth is a *semantic*
+  converter and deliberately drops it: alignment (`w:jc`), font size (`w:sz`), indents (`w:ind`),
+  tab stops (`w:tabs`) and page setup (`w:sectPr`). A right-aligned tab stop makes the text after
+  it END on the stop, which is how a CV gets its dates flush to the margin.
+- That second pass correlates by TEXT, not position: properties attach to a block only when its
+  text matches the paragraph in the XML. If mammoth merged or split something, the rest is simply
+  not applied — it degrades to plain output instead of confidently formatting the wrong paragraph.
+  The whole pass sits in a catch, since it is an enhancement and must never break a conversion
+  that already worked. `styled` / `unstyled` in the result report the split.
+- Reading `<w:p>` text for that correlation must exclude `<w:pPr>`. The tab-stop DEFINITIONS in
+  there are `<w:tab>` elements too, indistinguishable by tag name from real tab characters, and
+  counting them prefixed a spurious tab to exactly the paragraphs whose properties matter most.
 - Input limits live in `src/lib/ui/limits.ts`. Everything runs in the visitor's tab, so passing
   the memory ceiling kills the tab rather than raising an error — files are screened before being
   decoded, and an oversized page is skipped with a suggested scale rather than taken on.
 
 ## Roadmap
 
-All eleven tools are live: color converter, contrast checker, palette collection, QR generator,
-image converter, image→PDF, PDF→JPG, compress PDF, protect PDF, unlock PDF, Word→PDF.
+All eight tools are live: QR generator, image converter, image→PDF, PDF→JPG, compress PDF,
+protect PDF, unlock PDF, Word→PDF.
+
+The three colour tools (color converter, contrast checker, palette collection) were removed. The
+colour parsing and WCAG ratio helpers they shared stayed, trimmed to what the QR generator uses.
 
 Next: possibly PDF→Word — but see the note below before building it.
 
