@@ -23,7 +23,7 @@ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import { protectPdf, classifyPasswordError, inspectEncryption } from '../src/lib/pdf/protect.ts';
 import { unlockPdf } from '../src/lib/pdf/unlock.ts';
-import { recompressImages, flattenToImages, percentSaved } from '../src/lib/pdf/compress.ts';
+import { recompressImages, flattenToImages, percentSaved, estimateRecompress, describeEstimate } from '../src/lib/pdf/compress.ts';
 import sharp from 'sharp';
 import { zipSync, strToU8 } from 'fflate';
 import { docxToPdf, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
@@ -581,6 +581,93 @@ const plain = await makePlain();
   const hindiPdf = await pdfjs.getDocument({ data: new Uint8Array(hindi.bytes), isEvalSupported: false }).promise;
   const hindiText = (await (await hindiPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join(' ');
   ok(hindiText.includes('Hello and'), 'word: the Latin part still renders alongside it');
+}
+
+
+/* -------------- 16. compress: the estimate must match what actually happens */
+
+{
+  // Several noisy photos, so the sampling path and the arithmetic both matter.
+  const photos = [];
+  for (let i = 0; i < 3; i++) {
+    photos.push(
+      await sharp({
+        create: {
+          width: 1200 + i * 100,
+          height: 900,
+          channels: 3,
+          background: { r: 40 + i * 30, g: 90, b: 120 },
+          noise: { type: 'gaussian', mean: 128, sigma: 42 },
+        },
+      })
+        .jpeg({ quality: 92 })
+        .toBuffer(),
+    );
+  }
+
+  const doc = await PDFDocument.create();
+  const font = await doc.embedFont(StandardFonts.Helvetica);
+  for (const [i, photo] of photos.entries()) {
+    const img = await doc.embedJpg(photo);
+    const page = doc.addPage([595, 842]);
+    page.drawImage(img, { x: 40, y: 420, width: 515, height: 380 });
+    page.drawText(`${SECRET} ${i + 1}`, { x: 40, y: 360, size: 15, font });
+  }
+  const source = await doc.save();
+
+  const encode = async (input, { quality, maxEdge }) => {
+    let pipeline = sharp(Buffer.from(input));
+    if (maxEdge) {
+      pipeline = pipeline.resize({ width: maxEdge, height: maxEdge, fit: 'inside', withoutEnlargement: true });
+    }
+    const buf = await pipeline.jpeg({ quality: Math.round(quality * 100) }).toBuffer();
+    const meta = await sharp(buf).metadata();
+    return { bytes: new Uint8Array(buf), width: meta.width, height: meta.height };
+  };
+
+  const settings = { quality: 0.5, maxEdge: 900, encode };
+
+  const predicted = await estimateRecompress(source, settings);
+  const { bytes: actual, report } = await recompressImages(source, settings);
+
+  eq(predicted.touched, report.touched, 'estimate: touches the same number of images as the real run');
+  eq(predicted.sampled, false, 'estimate: three images is under the sampling limit');
+  ok(predicted.after < predicted.before, 'estimate: predicts a smaller file');
+
+  // The only thing the estimate cannot know is the xref the save rewrites, so
+  // it should land within a few percent. A number that drifts further than that
+  // is worse than showing nothing.
+  const drift = Math.abs(predicted.after - actual.length) / actual.length;
+  ok(drift < 0.05, `estimate: within 5% of the real result (${(drift * 100).toFixed(2)}% off)`);
+
+  // Moving the quality dial must move the estimate in the right direction.
+  const low = await estimateRecompress(source, { ...settings, quality: 0.3 });
+  const high = await estimateRecompress(source, { ...settings, quality: 0.9 });
+  ok(low.after < predicted.after, `estimate: lower quality predicts smaller (${low.after} < ${predicted.after})`);
+  ok(high.after > predicted.after, `estimate: higher quality predicts larger (${high.after} > ${predicted.after})`);
+
+  // And the resolution cap must matter too.
+  const uncapped = await estimateRecompress(source, { ...settings, maxEdge: null });
+  ok(uncapped.after > predicted.after, 'estimate: keeping full resolution predicts a larger file');
+
+  // Direction holds against reality, not just against itself.
+  const { bytes: actualLow } = await recompressImages(source, { ...settings, quality: 0.3 });
+  ok(actualLow.length < actual.length, 'estimate: the real run agrees that lower quality is smaller');
+
+  eq(
+    describeEstimate({ before: 1000, after: 400, touched: 2, skipped: {}, sampled: false }, (n) => `${n} B`),
+    '400 B · about 60% smaller',
+    'estimate: reads as a size and a percentage',
+  );
+  ok(
+    describeEstimate({ before: 1000, after: 400, touched: 2, skipped: {}, sampled: true }, (n) => `${n} B`).startsWith('≈'),
+    'estimate: a sampled estimate is marked approximate',
+  );
+  eq(
+    describeEstimate({ before: 1000, after: 1000, touched: 0, skipped: {}, sampled: false }, (n) => `${n} B`),
+    'Nothing here can be recompressed at this setting.',
+    'estimate: says so when there is nothing to gain',
+  );
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

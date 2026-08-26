@@ -80,6 +80,7 @@ const DPIS = [
       </div>
 
       <p class="cp__stats" id="cp-stats"></p>
+      <p class="cp__estimate" id="cp-estimate" role="status" aria-live="polite"></p>
 
       <div class="cp__actions">
         <button id="cp-run" class="btn btn--solid btn--sm" type="button">
@@ -152,6 +153,17 @@ const DPIS = [
     min-height: 1em;
   }
 
+  .cp__estimate {
+    margin: 0.35rem 0 0;
+    font-size: 0.86rem;
+    color: var(--accent);
+    font-family: var(--mono);
+    min-height: 1.2em;
+  }
+  /* Dimmed while a fresh estimate is being worked out, so a stale number is
+     never mistaken for the current one. */
+  .cp__estimate[data-pending] { color: var(--ink-faint); }
+
   .cp__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.2rem; }
 
   .cp__progress { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
@@ -203,6 +215,7 @@ const DPIS = [
   import { inspectEncryption } from '../../lib/pdf/pdflib';
   import {
     recompressImages, flattenToImages, describeReport, percentSaved, isNoOp,
+    estimateRecompress, estimateFlatten, describeEstimate,
     type CompressReport, type ImageEncoder,
   } from '../../lib/pdf/compress';
 
@@ -221,6 +234,7 @@ const DPIS = [
   const dpi = $<HTMLSelectElement>('cp-dpi');
   const dpiField = $<HTMLElement>('cp-dpi-field');
   const stats = $<HTMLParagraphElement>('cp-stats');
+  const estimateEl = $<HTMLParagraphElement>('cp-estimate');
   const runBtn = $<HTMLButtonElement>('cp-run');
   const clearBtn = $<HTMLButtonElement>('cp-clear');
   const progress = $<HTMLElement>('cp-progress');
@@ -296,6 +310,7 @@ const DPIS = [
       form.hidden = false;
       stats.textContent = `${formatBytes(file.size)} · ${pageCount} page${pageCount === 1 ? '' : 's'}`;
       syncMode();
+      scheduleEstimate();
     } catch (err) {
       if (err instanceof PasswordRequired) {
         passPanel.hidden = false;
@@ -361,6 +376,62 @@ const DPIS = [
     };
 
     return { doc, pages, renderPage };
+  }
+
+  /* ------------------------------------------------------------- estimate */
+
+  // Bumped on every settings change so a slow estimate cannot overwrite a
+  // newer one — dragging the slider starts several in quick succession.
+  let estimateToken = 0;
+  let estimateTimer: number | undefined;
+
+  function showEstimate(text: string, pending = false) {
+    estimateEl.textContent = text;
+    if (pending) estimateEl.setAttribute('data-pending', '');
+    else estimateEl.removeAttribute('data-pending');
+  }
+
+  async function estimate() {
+    if (!bytes || !file || busy) return;
+    const token = ++estimateToken;
+    showEstimate('Estimating…', true);
+
+    try {
+      const q = Number(quality.value) / 100;
+      let result;
+
+      if (mode() === 'flatten') {
+        const scale = Number(dpi.value) || 2;
+        const { doc, pages, renderPage } = await makeRenderer(scale, q);
+        try {
+          result = await estimateFlatten(file.size, { pages, renderPage });
+        } finally {
+          await doc.loadingTask.destroy();
+        }
+      } else {
+        result = await estimateRecompress(bytes, {
+          quality: q,
+          maxEdge: Number(cap.value) || null,
+          encode: encodeJpeg,
+          password,
+        });
+      }
+
+      if (token !== estimateToken) return;
+      showEstimate(describeEstimate(result, formatBytes));
+    } catch {
+      if (token !== estimateToken) return;
+      // An estimate is a convenience; failing to produce one must not look
+      // like the conversion itself failed.
+      showEstimate('');
+    }
+  }
+
+  function scheduleEstimate() {
+    window.clearTimeout(estimateTimer);
+    estimateToken++;
+    showEstimate('Estimating…', true);
+    estimateTimer = window.setTimeout(() => void estimate(), 350);
   }
 
   async function run() {
@@ -476,8 +547,12 @@ const DPIS = [
     if (e.key === 'Enter') void probe(passInput.value);
   });
 
-  form.addEventListener('input', syncMode);
-  form.addEventListener('change', syncMode);
+  const onSettingsChange = () => {
+    syncMode();
+    scheduleEstimate();
+  };
+  form.addEventListener('input', onSettingsChange);
+  form.addEventListener('change', onSettingsChange);
   runBtn.addEventListener('click', () => void run());
 
   clearBtn.addEventListener('click', () => {
@@ -490,6 +565,7 @@ const DPIS = [
     passPanel.hidden = true;
     errEl.textContent = '';
     stats.textContent = '';
+    showEstimate('');
     result.replaceChildren();
   });
 

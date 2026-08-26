@@ -85,25 +85,25 @@ export interface RecompressOptions {
   password?: string;
 }
 
+interface Candidate {
+  ref: unknown;
+  stream: { dict: { get: (k: unknown) => unknown; set: (k: unknown, v: unknown) => void }; contents: Uint8Array };
+  info: ImageInfo;
+  verdict: SkipReason | 'recompress';
+}
+
 /**
- * Re-encodes every eligible image in place.
+ * Finds every image XObject and classifies it.
  *
- * Text, vectors and fonts are untouched: only image stream contents change,
- * plus the three dictionary entries that describe them.
+ * Shared by the real run and the size estimate on purpose: an estimate derived
+ * from different rules than the conversion would drift from it, and a number
+ * that quietly disagrees with the result is worse than no number at all.
  */
-export async function recompressImages(
-  input: Uint8Array,
-  { quality, maxEdge, encode, password }: RecompressOptions,
-): Promise<{ bytes: Uint8Array; report: CompressReport }> {
-  const { PDFDocument, PDFName, PDFRawStream, PDFArray } = await loadPdfLib();
-
-  const doc = await PDFDocument.load(input, password ? { password } : undefined);
-  const skipped: Partial<Record<SkipReason, number>> = {};
-  const note = (reason: SkipReason) => {
-    skipped[reason] = (skipped[reason] ?? 0) + 1;
-  };
-
-  let touched = 0;
+async function collectImages(doc: {
+  context: { enumerateIndirectObjects: () => Iterable<[unknown, unknown]> };
+}): Promise<Candidate[]> {
+  const { PDFName, PDFRawStream, PDFArray } = await loadPdfLib();
+  const out: Candidate[] = [];
 
   for (const [ref, obj] of doc.context.enumerateIndirectObjects()) {
     if (!(obj instanceof PDFRawStream)) continue;
@@ -124,28 +124,54 @@ export async function recompressImages(
       bytes: obj.contents.length,
     };
 
-    const verdict = classifyImage(info);
-    if (verdict !== 'recompress') {
-      note(verdict);
+    out.push({ ref, stream: obj as unknown as Candidate['stream'], info, verdict: classifyImage(info) });
+  }
+  return out;
+}
+
+const tally = (skipped: Partial<Record<SkipReason, number>>, reason: SkipReason) => {
+  skipped[reason] = (skipped[reason] ?? 0) + 1;
+};
+
+/**
+ * Re-encodes every eligible image in place.
+ *
+ * Text, vectors and fonts are untouched: only image stream contents change,
+ * plus the three dictionary entries that describe them.
+ */
+export async function recompressImages(
+  input: Uint8Array,
+  { quality, maxEdge, encode, password }: RecompressOptions,
+): Promise<{ bytes: Uint8Array; report: CompressReport }> {
+  const { PDFDocument, PDFName, PDFRawStream } = await loadPdfLib();
+
+  const doc = await PDFDocument.load(input, password ? { password } : undefined);
+  const skipped: Partial<Record<SkipReason, number>> = {};
+  let touched = 0;
+
+  for (const candidate of await collectImages(doc)) {
+    if (candidate.verdict !== 'recompress') {
+      tally(skipped, candidate.verdict);
       continue;
     }
 
     let encoded: Encoded | null;
     try {
-      encoded = await encode(obj.contents, { quality, maxEdge });
+      encoded = await encode(candidate.stream.contents, { quality, maxEdge });
     } catch {
       encoded = null;
     }
     if (!encoded) {
-      note('encoder failed');
+      tally(skipped, 'encoder failed');
       continue;
     }
     // Never make a file bigger in the name of compression.
-    if (encoded.bytes.length >= info.bytes) {
-      note('no gain');
+    if (encoded.bytes.length >= candidate.info.bytes) {
+      tally(skipped, 'no gain');
       continue;
     }
 
+    const dict = candidate.stream.dict;
     dict.set(PDFName.of('Length'), doc.context.obj(encoded.bytes.length));
     dict.set(PDFName.of('Width'), doc.context.obj(encoded.width));
     dict.set(PDFName.of('Height'), doc.context.obj(encoded.height));
@@ -153,7 +179,7 @@ export async function recompressImages(
     // make readers misinterpret three channels as one.
     dict.set(PDFName.of('ColorSpace'), PDFName.of('DeviceRGB'));
     dict.set(PDFName.of('BitsPerComponent'), doc.context.obj(8));
-    doc.context.assign(ref, PDFRawStream.of(dict, encoded.bytes));
+    doc.context.assign(candidate.ref as never, PDFRawStream.of(dict as never, encoded.bytes));
     touched++;
   }
 
@@ -162,6 +188,129 @@ export async function recompressImages(
     bytes,
     report: { before: input.length, after: bytes.length, touched, skipped, textPreserved: true },
   };
+}
+
+/* ---------------------------------------------------------------- estimate */
+
+export interface Estimate {
+  before: number;
+  /** Predicted size of the compressed file. */
+  after: number;
+  touched: number;
+  skipped: Partial<Record<SkipReason, number>>;
+  /** True when only the largest images were encoded and the rest extrapolated. */
+  sampled: boolean;
+}
+
+/**
+ * How many images to actually encode before extrapolating. Encoding is the
+ * expensive part, and this runs on every drag of the quality slider.
+ */
+export const SAMPLE_LIMIT = 6;
+
+/**
+ * Predicts the compressed size without building the PDF.
+ *
+ * Everything that is not an image byte is untouched by this mode, so the
+ * arithmetic is simply: original size, minus the images we will replace, plus
+ * what they become. The only error is the small amount of xref the save
+ * rewrites.
+ */
+export async function estimateRecompress(
+  input: Uint8Array,
+  { quality, maxEdge, encode, password }: RecompressOptions,
+): Promise<Estimate> {
+  const { PDFDocument } = await loadPdfLib();
+  const doc = await PDFDocument.load(input, password ? { password } : undefined);
+
+  const candidates = await collectImages(doc);
+  const skipped: Partial<Record<SkipReason, number>> = {};
+  const eligible: Candidate[] = [];
+
+  for (const candidate of candidates) {
+    if (candidate.verdict === 'recompress') eligible.push(candidate);
+    else tally(skipped, candidate.verdict);
+  }
+
+  // Largest first, so a sample covers the bytes that actually matter.
+  eligible.sort((a, b) => b.info.bytes - a.info.bytes);
+  const sampled = eligible.length > SAMPLE_LIMIT;
+  const toEncode = sampled ? eligible.slice(0, SAMPLE_LIMIT) : eligible;
+
+  let sampledBefore = 0;
+  let sampledAfter = 0;
+  let touched = 0;
+
+  for (const candidate of toEncode) {
+    let encoded: Encoded | null;
+    try {
+      encoded = await encode(candidate.stream.contents, { quality, maxEdge });
+    } catch {
+      encoded = null;
+    }
+    if (!encoded) {
+      tally(skipped, 'encoder failed');
+      continue;
+    }
+    if (encoded.bytes.length >= candidate.info.bytes) {
+      tally(skipped, 'no gain');
+      continue;
+    }
+    sampledBefore += candidate.info.bytes;
+    sampledAfter += encoded.bytes.length;
+    touched++;
+  }
+
+  // Extrapolate the remainder at the ratio the sample achieved.
+  const ratio = sampledBefore > 0 ? sampledAfter / sampledBefore : 1;
+  const restBefore = sampled
+    ? eligible.slice(SAMPLE_LIMIT).reduce((sum, c) => sum + c.info.bytes, 0)
+    : 0;
+  const restAfter = Math.round(restBefore * ratio);
+  if (sampled) touched += eligible.length - SAMPLE_LIMIT;
+
+  const saved = sampledBefore - sampledAfter + (restBefore - restAfter);
+  return {
+    before: input.length,
+    after: Math.max(1024, input.length - saved),
+    touched,
+    skipped,
+    sampled,
+  };
+}
+
+/**
+ * Predicts the flattened size by rendering one page and scaling by the count.
+ *
+ * Rendering every page to preview a number would cost as much as doing the
+ * conversion, so this is explicitly an estimate and the UI labels it as one.
+ */
+export async function estimateFlatten(
+  originalSize: number,
+  { renderPage, pages }: Pick<FlattenOptions, 'renderPage' | 'pages'>,
+): Promise<Estimate> {
+  if (!pages.length) {
+    return { before: originalSize, after: originalSize, touched: 0, skipped: {}, sampled: false };
+  }
+  const first = await renderPage(pages[0].number);
+  // Roughly 1.5 kB of PDF structure wraps each embedded page image.
+  const perPage = first.bytes.length + 1536;
+  return {
+    before: originalSize,
+    after: Math.max(1024, perPage * pages.length),
+    touched: pages.length,
+    skipped: {},
+    sampled: pages.length > 1,
+  };
+}
+
+/** "≈ 412 kB · 76% smaller", or an honest note when it would not shrink. */
+export function describeEstimate(estimate: Estimate, formatBytes: (n: number) => string): string {
+  const pct = percentSaved(estimate.before, estimate.after);
+  const prefix = estimate.sampled ? '≈ ' : '';
+  if (estimate.touched === 0) return 'Nothing here can be recompressed at this setting.';
+  if (pct <= 0) return `${prefix}${formatBytes(estimate.after)} — no smaller than the original.`;
+  return `${prefix}${formatBytes(estimate.after)} · about ${pct}% smaller`;
 }
 
 export interface FlattenOptions {
