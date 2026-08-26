@@ -31,6 +31,15 @@
 
 * { box-sizing: border-box; }
 
+/* The `hidden` attribute is honoured only by the UA rule [hidden]{display:none},
+   which ANY author `display:` declaration outranks. A panel styled
+   `display: grid` therefore ignores `hidden` and renders anyway — which is
+   exactly what made every tab panel in the QR generator show at once. Nothing
+   in this project ever wants a hidden element laid out, so !important is the
+   correct fix rather than a workaround, and it keeps `el.hidden = true` working
+   as written in every tool. */
+[hidden] { display: none !important; }
+
 html {
   -webkit-text-size-adjust: 100%;
   scroll-behavior: smooth;
