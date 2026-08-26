@@ -15,7 +15,10 @@
   --line: rgba(255, 255, 255, 0.09);
   --line-strong: rgba(255, 255, 255, 0.16);
 
-  --serif: "Fraunces", Georgia, "Times New Roman", serif;
+  /* Newsreader: variable optical-size axis (6..72), so the browser adjusts the
+     letterforms for display sizes on its own via font-optical-sizing. Headings
+     stay at weight 300 — the size the face was picked at. */
+  --serif: "Newsreader", Georgia, "Times New Roman", serif;
   --sans: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace;
 
