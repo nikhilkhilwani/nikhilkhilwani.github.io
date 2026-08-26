@@ -20,6 +20,7 @@ import {
   LIMITS, screenFiles, formatLimit, describeRejections,
   canvasPixelsFor, exceedsCanvasBudget, largestSafeScale,
 } from '../src/lib/ui/limits.ts';
+import { classifyImage, percentSaved, describeReport, isNoOp } from '../src/lib/pdf/compress.ts';
 
 let fail = 0;
 let pass = 0;
@@ -365,6 +366,58 @@ ok(
 );
 eq(largestSafeScale(0, 0), 1, 'a degenerate page size does not divide by zero');
 ok(largestSafeScale(100000, 100000) >= 0.1, 'an absurd page still yields a positive scale');
+
+/* ------------------------------------------------------------- compress-pdf */
+
+const img = (over = {}) => ({
+  filters: ['/DCTDecode'],
+  colorSpace: '/DeviceRGB',
+  hasSMask: false,
+  bytes: 200_000,
+  ...over,
+});
+
+eq(classifyImage(img()), 'recompress', 'an RGB JPEG is recompressible');
+eq(classifyImage(img({ colorSpace: '/DeviceGray' })), 'recompress', 'a grayscale JPEG is recompressible');
+eq(classifyImage(img({ hasSMask: true })), 'transparency', 'alpha is refused — JPEG has none');
+eq(classifyImage(img({ filters: ['/FlateDecode'] })), 'not a JPEG', 'lossless images are left alone');
+eq(classifyImage(img({ filters: ['/JPXDecode'] })), 'not a JPEG', 'JPEG 2000 is left alone');
+eq(classifyImage(img({ filters: ['/CCITTFaxDecode'] })), 'not a JPEG', 'fax encoding is left alone');
+eq(classifyImage(img({ colorSpace: '/DeviceCMYK' })), 'unsupported colour', 'CMYK is refused rather than colour-shifted');
+eq(classifyImage(img({ colorSpace: '/Indexed' })), 'unsupported colour', 'indexed colour is refused');
+eq(classifyImage(img({ colorSpace: undefined })), 'unsupported colour', 'a missing colour space is refused');
+eq(classifyImage(img({ bytes: 500 })), 'already small', 'a tiny image is not worth touching');
+// Transparency outranks everything: it is the one that would visibly corrupt.
+eq(classifyImage(img({ hasSMask: true, filters: ['/FlateDecode'] })), 'transparency', 'alpha is checked first');
+eq(classifyImage(img({ bytes: 5000 }), 4096), 'recompress', 'the small-image floor is configurable');
+
+eq(percentSaved(1000, 250), 75, 'percentSaved 75%');
+eq(percentSaved(1000, 1000), 0, 'percentSaved 0% when unchanged');
+eq(percentSaved(1000, 1200), -20, 'percentSaved negative when it grew');
+eq(percentSaved(0, 10), 0, 'percentSaved guards divide-by-zero');
+
+const rep = (over = {}) => ({
+  before: 1000, after: 400, touched: 3, skipped: {}, textPreserved: true, ...over,
+});
+
+ok(describeReport(rep()).includes('Recompressed 3 images'), 'report counts what it touched');
+ok(describeReport(rep()).includes('60% smaller'), 'report states the saving');
+ok(describeReport(rep()).includes('Text and vectors are untouched'), 'report states what survived');
+ok(describeReport(rep({ touched: 1 })).includes('1 image —'), 'report is singular for one image');
+ok(
+  describeReport(rep({ skipped: { transparency: 2, 'not a JPEG': 1 } })).includes('Left alone: 2 transparency, 1 not a JPEG'),
+  'report names what it skipped and why',
+);
+ok(
+  describeReport(rep({ textPreserved: false, touched: 5 })).includes('Text is no longer selectable'),
+  'flatten mode says plainly what it cost',
+);
+ok(describeReport(rep({ after: 1000 })).includes('the same size'), 'no change is described honestly');
+ok(describeReport(rep({ after: 1200 })).includes('20% larger'), 'growth is described honestly');
+
+ok(isNoOp(rep({ touched: 0 })), 'recompressing nothing is a no-op');
+ok(!isNoOp(rep({ touched: 1 })), 'touching one image is not a no-op');
+ok(!isNoOp(rep({ textPreserved: false, touched: 0 })), 'flattening is never reported as a no-op');
 
 /* -------------------------------------------------------------------- end */
 

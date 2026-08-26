@@ -89,7 +89,7 @@ export const tools: ToolMeta[] = [
     title: 'Compress PDF',
     description: 'Shrink a PDF by recompressing its embedded images, leaving text and vectors sharp.',
     icon: 'minimize',
-    status: 'coming-soon',
+    status: 'available',
     category: 'pdf',
   },
   {

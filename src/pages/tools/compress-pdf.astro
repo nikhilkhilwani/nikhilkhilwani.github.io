@@ -1,0 +1,496 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+
+const CAPS = [
+  { value: '0', label: 'Keep original resolution' },
+  { value: '2400', label: '2400 px — large print' },
+  { value: '1600', label: '1600 px — good default' },
+  { value: '1200', label: '1200 px' },
+  { value: '900', label: '900 px — screen only' },
+];
+
+const DPIS = [
+  { value: '1.5', label: '108 dpi — small' },
+  { value: '2', label: '144 dpi — good default' },
+  { value: '3', label: '216 dpi — sharper' },
+];
+---
+
+<ToolLayout slug="compress-pdf">
+  <div class="cp">
+    <Dropzone
+      id="cp-file"
+      accept="application/pdf"
+      icon="minimize"
+      label="Choose a PDF, or drop one anywhere"
+      hint="Shrunk in this tab. Nothing is uploaded, and the original file on your device is never modified."
+    />
+
+    <section class="panel" id="cp-pass" hidden>
+      <div class="field">
+        <label for="cp-pass-input">This PDF is password-protected</label>
+        <div class="cp__row">
+          <input id="cp-pass-input" type="password" autocomplete="off" placeholder="Password" />
+          <button id="cp-pass-go" class="btn btn--sm" type="button">Unlock</button>
+        </div>
+        <p class="cp__err" id="cp-pass-err" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="panel" id="cp-form" hidden>
+      <fieldset class="cp__mode">
+        <legend class="eyebrow">How to shrink it</legend>
+        <label class="radio">
+          <input type="radio" name="cp-mode" value="images" checked />
+          <span>
+            <strong>Recompress the pictures</strong>
+            <small>Text, vectors and fonts stay exactly as they are, and stay selectable. Best for reports and documents with photos.</small>
+          </span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="cp-mode" value="flatten" />
+          <span>
+            <strong>Flatten every page to an image</strong>
+            <small>Shrinks scans much further, but the text stops being selectable or searchable. Best for scanned paper.</small>
+          </span>
+        </label>
+      </fieldset>
+
+      <div class="cp__grid">
+        <div class="field">
+          <label for="cp-quality">Picture quality <output id="cp-quality-out">60</output></label>
+          <input id="cp-quality" type="range" min="30" max="90" step="5" value="60" />
+        </div>
+
+        <div class="field" id="cp-cap-field">
+          <label for="cp-cap">Shrink large pictures to</label>
+          <select id="cp-cap">
+            {CAPS.map((c) => <option value={c.value} selected={c.value === '1600'}>{c.label}</option>)}
+          </select>
+        </div>
+
+        <div class="field" id="cp-dpi-field" hidden>
+          <label for="cp-dpi">Page resolution</label>
+          <select id="cp-dpi">
+            {DPIS.map((d) => <option value={d.value} selected={d.value === '2'}>{d.label}</option>)}
+          </select>
+        </div>
+      </div>
+
+      <p class="cp__stats" id="cp-stats"></p>
+
+      <div class="cp__actions">
+        <button id="cp-run" class="btn btn--solid btn--sm" type="button">
+          <Icon name="minimize" size={15} /> Compress
+        </button>
+        <button id="cp-clear" class="btn btn--sm" type="button">
+          <Icon name="trash" size={15} /> Clear
+        </button>
+      </div>
+
+      <div class="cp__progress" id="cp-progress" hidden>
+        <div class="cp__track"><span id="cp-fill"></span></div>
+        <p class="cp__pct mono" id="cp-pct">0%</p>
+      </div>
+
+      <p class="cp__err" id="cp-err" role="status" aria-live="polite"></p>
+    </section>
+
+    <ul class="cp__result" id="cp-result"></ul>
+  </div>
+</ToolLayout>
+
+<style>
+  .cp { display: grid; gap: clamp(14px, 2vw, 20px); }
+
+  .cp__row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .cp__row input { flex: 1 1 12rem; min-width: 0; }
+  .cp__row .btn { flex: 0 0 auto; }
+
+  .cp__err { margin: 0.6rem 0 0; font-size: 0.8rem; color: var(--bad); min-height: 1em; line-height: 1.5; }
+
+  fieldset { border: 0; margin: 0; padding: 0; }
+  legend { padding: 0; }
+
+  .cp__mode { display: grid; gap: 0.5rem; padding-bottom: 1.3rem; }
+  .radio {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    padding: 0.7rem 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--surface);
+    cursor: pointer;
+    transition: border-color 0.18s;
+  }
+  .radio:has(input:checked) { border-color: var(--accent); background: rgba(110, 231, 215, 0.05); }
+  .radio input { margin-top: 0.2rem; accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 auto; }
+  .radio span { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+  .radio strong { font-weight: 400; font-size: 0.92rem; }
+  .radio small { color: var(--ink-faint); font-size: 0.78rem; line-height: 1.5; }
+
+  .cp__grid {
+    display: grid;
+    gap: 1.15rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1.3rem;
+  }
+  @media (min-width: 640px) {
+    .cp__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  }
+  .cp__grid .field > label { display: flex; justify-content: space-between; gap: 0.5rem; }
+  .cp__grid output { font-family: var(--mono); color: var(--ink-dim); }
+
+  .cp__stats {
+    margin: 1.2rem 0 0;
+    font-size: 0.82rem;
+    color: var(--ink-dim);
+    font-family: var(--mono);
+    min-height: 1em;
+  }
+
+  .cp__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.2rem; }
+
+  .cp__progress { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
+  .cp__track {
+    flex: 1 1 auto;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.09);
+    overflow: hidden;
+  }
+  .cp__track span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s linear; }
+  .cp__pct { font-size: 0.76rem; color: var(--ink-faint); margin: 0; min-width: 3.4em; text-align: right; }
+
+  .cp__result { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+</style>
+
+<!-- Runtime-created elements need global rules: Astro appends
+     [data-astro-cid-…] to scoped selectors, and document.createElement() nodes
+     never carry that attribute. Namespaced under this page's own list class. -->
+
+<style is:global>
+  .cp__result .done {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    background: var(--surface);
+    border: 1px solid color-mix(in srgb, var(--good) 35%, var(--line));
+    border-radius: var(--r-sm);
+    padding: 0.8rem 0.9rem;
+  }
+  .cp__result .done--flat { border-color: color-mix(in srgb, var(--warn) 35%, var(--line)); }
+  .cp__result .done__icon { color: var(--good); flex: 0 0 auto; display: grid; place-items: center; padding-top: 2px; }
+  .cp__result .done--flat .done__icon { color: var(--warn); }
+  .cp__result .done__text { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; flex: 1 1 16rem; }
+  .cp__result .done__name { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .cp__result .done__size { font-size: 0.8rem; color: var(--ink-dim); font-family: var(--mono); }
+  .cp__result .done__note { font-size: 0.8rem; color: var(--ink-faint); line-height: 1.55; }
+</style>
+
+<script>
+  import { initDropzone } from '../../lib/ui/dropzone';
+  import { downloadBlob } from '../../lib/ui/download';
+  import { toast } from '../../lib/ui/clipboard';
+  import { formatBytes, stemOf } from '../../lib/ui/files';
+  import { LIMITS, canvasPixelsFor, exceedsCanvasBudget } from '../../lib/ui/limits';
+  import { decodeImage, sizeOf, releaseImage, drawToCanvas, canvasToBlob, fitWithin } from '../../lib/img/raster';
+  import { openPdf, PasswordRequired } from '../../lib/pdf/pdfjs';
+  import { inspectEncryption } from '../../lib/pdf/pdflib';
+  import {
+    recompressImages, flattenToImages, describeReport, percentSaved, isNoOp,
+    type CompressReport, type ImageEncoder,
+  } from '../../lib/pdf/compress';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const passPanel = $<HTMLElement>('cp-pass');
+  const passInput = $<HTMLInputElement>('cp-pass-input');
+  const passGo = $<HTMLButtonElement>('cp-pass-go');
+  const passErr = $<HTMLParagraphElement>('cp-pass-err');
+
+  const form = $<HTMLElement>('cp-form');
+  const quality = $<HTMLInputElement>('cp-quality');
+  const qualityOut = $<HTMLOutputElement>('cp-quality-out');
+  const cap = $<HTMLSelectElement>('cp-cap');
+  const capField = $<HTMLElement>('cp-cap-field');
+  const dpi = $<HTMLSelectElement>('cp-dpi');
+  const dpiField = $<HTMLElement>('cp-dpi-field');
+  const stats = $<HTMLParagraphElement>('cp-stats');
+  const runBtn = $<HTMLButtonElement>('cp-run');
+  const clearBtn = $<HTMLButtonElement>('cp-clear');
+  const progress = $<HTMLElement>('cp-progress');
+  const fill = $<HTMLElement>('cp-fill');
+  const pct = $<HTMLElement>('cp-pct');
+  const errEl = $<HTMLParagraphElement>('cp-err');
+  const result = $<HTMLUListElement>('cp-result');
+
+  let file: File | null = null;
+  let bytes: Uint8Array | null = null;
+  let password: string | undefined;
+  let pageCount = 0;
+  let busy = false;
+
+  const mode = () =>
+    (document.querySelector<HTMLInputElement>('input[name="cp-mode"]:checked')?.value ?? 'images') as
+      | 'images'
+      | 'flatten';
+
+  /**
+   * Canvas-backed JPEG re-encoder handed to recompressImages. The library stays
+   * encoder-agnostic so the same code is verified in Node by test-pdf.mjs.
+   */
+  const encodeJpeg: ImageEncoder = async (input, { quality: q, maxEdge }) => {
+    const blob = new Blob([input.slice().buffer as ArrayBuffer], { type: 'image/jpeg' });
+    const image = await decodeImage(blob);
+    try {
+      const from = sizeOf(image);
+      if (!from.width || !from.height) return null;
+      const to = fitWithin(from, maxEdge);
+      if (exceedsCanvasBudget(canvasPixelsFor(to.width, to.height, 1))) return null;
+
+      const canvas = drawToCanvas(image, to, { background: '#ffffff' });
+      const out = await canvasToBlob(canvas, 'image/jpeg', q);
+      canvas.width = canvas.height = 0;
+      return { bytes: new Uint8Array(await out.arrayBuffer()), width: to.width, height: to.height };
+    } finally {
+      releaseImage(image);
+    }
+  };
+
+  function syncMode() {
+    const flat = mode() === 'flatten';
+    capField.hidden = flat;
+    dpiField.hidden = !flat;
+    qualityOut.textContent = quality.value;
+  }
+
+  async function probe(pw?: string) {
+    if (!file) return;
+    errEl.textContent = '';
+    result.replaceChildren();
+
+    try {
+      bytes = new Uint8Array(await file.arrayBuffer());
+
+      // An encrypted source needs its password before anything can be read.
+      const shape = await inspectEncryption(bytes);
+      if (shape === 'user-password' && !pw) {
+        passPanel.hidden = false;
+        form.hidden = true;
+        passErr.textContent = '';
+        passInput.focus();
+        return;
+      }
+      password = shape === 'user-password' ? pw : undefined;
+
+      const opened = await openPdf(new Uint8Array(bytes), password);
+      pageCount = opened.pages;
+      await opened.doc.loadingTask.destroy();
+
+      passPanel.hidden = true;
+      form.hidden = false;
+      stats.textContent = `${formatBytes(file.size)} · ${pageCount} page${pageCount === 1 ? '' : 's'}`;
+      syncMode();
+    } catch (err) {
+      if (err instanceof PasswordRequired) {
+        passPanel.hidden = false;
+        form.hidden = true;
+        passErr.textContent = err.wrong ? 'That password did not work' : '';
+        passInput.focus();
+        return;
+      }
+      form.hidden = true;
+      errEl.textContent =
+        err instanceof Error ? `Could not read that PDF: ${err.message}` : 'Could not read that PDF';
+    }
+  }
+
+  function setProgress(done: number, total: number) {
+    progress.hidden = total === 0;
+    fill.style.width = `${total ? Math.round((done / total) * 100) : 0}%`;
+    pct.textContent = `${done}/${total}`;
+  }
+
+  /** Renders one page to a JPEG, for the flatten mode. */
+  async function makeRenderer(scale: number, q: number) {
+    const opened = await openPdf(new Uint8Array(bytes!), password);
+    const doc = opened.doc;
+
+    const pages: { number: number; width: number; height: number }[] = [];
+    for (let n = 1; n <= opened.pages; n++) {
+      const page = await doc.getPage(n);
+      const unscaled = page.getViewport({ scale: 1 });
+      pages.push({ number: n, width: unscaled.width, height: unscaled.height });
+      page.cleanup();
+    }
+
+    const renderPage = async (pageNumber: number) => {
+      const page = await doc.getPage(pageNumber);
+      const viewport = page.getViewport({ scale });
+      if (exceedsCanvasBudget(canvasPixelsFor(viewport.width, viewport.height, 1))) {
+        page.cleanup();
+        throw new Error(`Page ${pageNumber} is too large to rasterise at this resolution`);
+      }
+
+      const canvas = document.createElement('canvas');
+      canvas.width = Math.ceil(viewport.width);
+      canvas.height = Math.ceil(viewport.height);
+      const ctx = canvas.getContext('2d');
+      if (!ctx) throw new Error('Could not get a 2D canvas context');
+      // JPEG has no alpha, so an unpainted background would come out black.
+      ctx.fillStyle = '#ffffff';
+      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+
+      const blob = await canvasToBlob(canvas, 'image/jpeg', q);
+      // Capture the size BEFORE releasing the canvas: zeroing it first would
+      // report 0x0 for every page.
+      const rendered = { width: canvas.width, height: canvas.height };
+      canvas.width = canvas.height = 0;
+      page.cleanup();
+      return {
+        bytes: new Uint8Array(await blob.arrayBuffer()),
+        width: rendered.width,
+        height: rendered.height,
+      };
+    };
+
+    return { doc, pages, renderPage };
+  }
+
+  async function run() {
+    if (!bytes || !file || busy) return;
+
+    busy = true;
+    runBtn.disabled = true;
+    const label = runBtn.innerHTML;
+    runBtn.textContent = 'Compressing…';
+    errEl.textContent = '';
+    result.replaceChildren();
+
+    const q = Number(quality.value) / 100;
+
+    try {
+      let out: { bytes: Uint8Array; report: CompressReport };
+
+      if (mode() === 'flatten') {
+        const scale = Number(dpi.value) || 2;
+        setProgress(0, pageCount);
+        const { doc, pages, renderPage } = await makeRenderer(scale, q);
+        try {
+          out = await flattenToImages(file.size, {
+            pages,
+            renderPage,
+            onProgress: setProgress,
+          });
+        } finally {
+          await doc.loadingTask.destroy();
+        }
+      } else {
+        const maxEdge = Number(cap.value) || null;
+        out = await recompressImages(bytes, {
+          quality: q,
+          maxEdge,
+          encode: encodeJpeg,
+          password,
+        });
+      }
+
+      if (isNoOp(out.report)) {
+        errEl.textContent =
+          'Nothing here can be compressed further without flattening the pages. ' +
+          'The pictures are either absent, already small, or in a format this tool leaves alone.';
+        return;
+      }
+
+      const name = `${stemOf(file.name)}-compressed.pdf`;
+      const blob = new Blob([out.bytes.slice().buffer as ArrayBuffer], { type: 'application/pdf' });
+      downloadBlob(blob, name);
+      showResult(name, out.report, blob.size);
+      toast(`${percentSaved(out.report.before, blob.size)}% smaller`);
+    } catch (err) {
+      errEl.textContent =
+        err instanceof Error ? `Could not compress: ${err.message}` : 'Could not compress';
+    } finally {
+      busy = false;
+      progress.hidden = true;
+      runBtn.innerHTML = label;
+      runBtn.disabled = false;
+    }
+  }
+
+  function showResult(name: string, report: CompressReport, actualSize: number) {
+    const li = document.createElement('li');
+    li.className = report.textPreserved ? 'done' : 'done done--flat';
+
+    const icon = document.createElement('span');
+    icon.className = 'done__icon';
+    icon.innerHTML =
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>';
+
+    const text = document.createElement('span');
+    text.className = 'done__text';
+
+    const nm = document.createElement('span');
+    nm.className = 'done__name';
+    nm.textContent = name;
+
+    const size = document.createElement('span');
+    size.className = 'done__size';
+    size.textContent = `${formatBytes(report.before)} → ${formatBytes(actualSize)} · ${percentSaved(report.before, actualSize)}% saved`;
+
+    const note = document.createElement('span');
+    note.className = 'done__note';
+    note.textContent = describeReport({ ...report, after: actualSize });
+
+    text.append(nm, size, note);
+    li.append(icon, text);
+    result.replaceChildren(li);
+  }
+
+  initDropzone('cp-file', {
+    accept: ['application/pdf'],
+    maxBytes: LIMITS.pdf,
+    onTooLarge: (_r, message) => {
+      errEl.textContent = message;
+      form.hidden = true;
+      passPanel.hidden = true;
+    },
+    onFiles: (files) => {
+      file = files[0];
+      password = undefined;
+      passInput.value = '';
+      void probe();
+    },
+    onReject: () => toast('That is not a PDF'),
+  });
+
+  passGo.addEventListener('click', () => void probe(passInput.value));
+  passInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void probe(passInput.value);
+  });
+
+  form.addEventListener('input', syncMode);
+  form.addEventListener('change', syncMode);
+  runBtn.addEventListener('click', () => void run());
+
+  clearBtn.addEventListener('click', () => {
+    file = null;
+    bytes = null;
+    password = undefined;
+    pageCount = 0;
+    passInput.value = '';
+    form.hidden = true;
+    passPanel.hidden = true;
+    errEl.textContent = '';
+    stats.textContent = '';
+    result.replaceChildren();
+  });
+
+  syncMode();
+</script>

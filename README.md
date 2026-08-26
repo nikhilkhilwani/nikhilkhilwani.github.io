@@ -14,7 +14,7 @@ npm run dev        # local dev server, http://localhost:4321
 npm run build      # static build into dist/
 npm run preview    # serve the built dist/
 npm run check      # astro + TypeScript diagnostics
-npm test           # color/contrast math + file, QR, and page-range assertions
+npm test           # pure logic, plus PDF encryption verified against pdf.js
 npm run verify     # check + test + build + built-page contract check
 npm run palettes   # regenerate src/data/palettes.ts
 npm run sync:pdfjs # copy pdf.js runtime assets into public/ (runs on build)
@@ -42,6 +42,11 @@ src/
     ui/download.ts   blob download + ZIP packing (fflate)
     ui/dropzone.ts   wiring for Dropzone.astro
     ui/files.ts      filenames, byte formatting, page-range parsing
+    ui/limits.ts     input size and canvas-pixel ceilings
+    pdf/pdflib.ts    shared @cantoo/pdf-lib access, encryption detection
+    pdf/protect.ts   AES-256 encryption and permissions
+    pdf/unlock.ts    password removal by rebuilding the document
+    pdf/compress.ts  image recompression and page flattening
   pages/
     index.astro      landing page
     tools/           one file per tool — the URL is the filename
@@ -50,7 +55,8 @@ scripts/
   gen-palettes.mjs   seeded OKLCH palette generator
   sync-pdfjs.mjs     copies pdf.js CMaps/fonts/wasm into public/pdfjs
   test-color.mjs     assertions for the color + contrast math
-  test-tools.mjs     assertions for files, raster, and QR logic
+  test-tools.mjs     assertions for files, raster, QR, limits, and compression logic
+  test-pdf.mjs       encryption + compression verified with pdf.js (runs in CI)
   test-dom.mjs       checks built HTML against the JS that drives it
 public/
   pdfjs/             GENERATED + gitignored — see scripts/sync-pdfjs.mjs
@@ -93,15 +99,30 @@ Without that, Pages keeps serving the old root `index.html` from the branch and 
   `canvas` in the render call rather than only `canvasContext`.
 - Images bound for a PDF are embedded as-is when they are already JPEG or PNG, and re-encoded
   through a canvas otherwise — pdf-lib can embed nothing else.
+- `src/lib/pdf/pdflib.ts` carries a measured table of how @cantoo/pdf-lib behaves across the
+  three encryption shapes (none / owner-only / user password). An owner-only file opens on an
+  EMPTY-STRING password, not on no password, and `ignoreEncryption` loads the structure while
+  leaving content streams encrypted — so it must never be used to read a document.
+- Unlocking rebuilds the document with `copyPages`. That is the only approach that actually
+  drops `/Encrypt`: saving after `load({password})` leaves the reference in the xref dictionary,
+  and clearing `context.security` or `trailerInfo.Encrypt` has no effect. The cost is that
+  bookmarks, form fields and attachments do not survive, which the UI states.
+- `compress-pdf` takes its image encoder as an argument rather than importing one, so the same
+  code path runs under canvas in the browser and under sharp in `scripts/test-pdf.mjs`. That is
+  what lets CI verify the promise that recompression leaves text byte-identical.
+- Input limits live in `src/lib/ui/limits.ts`. Everything runs in the visitor's tab, so passing
+  the memory ceiling kills the tab rather than raising an error — files are screened before being
+  decoded, and an oversized page is skipped with a suggested scale rather than taken on.
 
 ## Roadmap
 
-Live: color converter, contrast checker, palette collection, QR generator, image converter,
-image→PDF, PDF→JPG.
+All ten tools are live: color converter, contrast checker, palette collection, QR generator,
+image converter, image→PDF, PDF→JPG, compress PDF, protect PDF, unlock PDF.
 
-Planned: compress PDF, protect PDF, unlock PDF.
+Next: Word→PDF, then possibly PDF→Word.
 
-The three PDF security tools need `qpdf` compiled to WASM, which requires
-`crossOriginIsolated`. GitHub Pages cannot set the COOP/COEP headers that normally provides, so
-those pages will need a `coi-serviceworker`-style shim that injects the headers client-side —
-loaded only on those pages, since first activation forces a reload.
+An earlier version of this file claimed the three PDF security tools needed `qpdf` compiled to
+WASM plus a `coi-serviceworker` shim for `crossOriginIsolated`. That turned out to be wrong.
+`@cantoo/pdf-lib` — a maintained MIT fork of pdf-lib — provides AES-256 encryption and
+password-protected loading directly, so there is no WASM, no COOP/COEP shim, and no forced
+reload anywhere in this project.

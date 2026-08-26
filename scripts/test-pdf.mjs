@@ -23,6 +23,8 @@ import * as pdfjs from 'pdfjs-dist/legacy/build/pdf.mjs';
 
 import { protectPdf, classifyPasswordError, inspectEncryption } from '../src/lib/pdf/protect.ts';
 import { unlockPdf } from '../src/lib/pdf/unlock.ts';
+import { recompressImages, flattenToImages, percentSaved } from '../src/lib/pdf/compress.ts';
+import sharp from 'sharp';
 import { OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
 
 let fail = 0;
@@ -279,6 +281,169 @@ const plain = await makePlain();
   ok(anyone.opened, 'round trip: protect then unlock yields a readable file');
   eq(anyone.pages, 3, 'round trip: pages intact');
   ok(anyone.text.includes(`${SECRET} 1`), 'round trip: text intact');
+}
+
+
+/* ------------------------------- 11. compress: recompression keeps the text */
+
+{
+  // A photographic JPEG, big enough that recompressing it clearly pays.
+  const photo = await sharp({
+    create: { width: 1400, height: 1000, channels: 3, background: { r: 30, g: 80, b: 110 } },
+  })
+    .composite([
+      {
+        input: await sharp({
+          create: { width: 700, height: 500, channels: 3, background: { r: 210, g: 130, b: 40 } },
+        })
+          .png()
+          .toBuffer(),
+        top: 120,
+        left: 250,
+      },
+    ])
+    .jpeg({ quality: 95 })
+    .toBuffer();
+
+  const withImages = await PDFDocument.create();
+  const font = await withImages.embedFont(StandardFonts.Helvetica);
+  const embedded = await withImages.embedJpg(photo);
+  for (let n = 1; n <= 2; n++) {
+    const page = withImages.addPage([595, 842]);
+    page.drawImage(embedded, { x: 40, y: 420, width: 515, height: 368 });
+    page.drawText(`${SECRET} ${n}`, { x: 40, y: 360, size: 15, font });
+  }
+  const source = await withImages.save();
+
+  // sharp stands in for the browser's canvas. Injecting the encoder is what
+  // lets this run in CI at all.
+  const encode = async (input, { quality, maxEdge }) => {
+    let pipeline = sharp(Buffer.from(input));
+    if (maxEdge) {
+      pipeline = pipeline.resize({ width: maxEdge, height: maxEdge, fit: 'inside', withoutEnlargement: true });
+    }
+    const buf = await pipeline.jpeg({ quality: Math.round(quality * 100) }).toBuffer();
+    const meta = await sharp(buf).metadata();
+    return { bytes: new Uint8Array(buf), width: meta.width, height: meta.height };
+  };
+
+  const { bytes: out, report } = await recompressImages(source, {
+    quality: 0.5,
+    maxEdge: 900,
+    encode,
+  });
+
+  eq(report.touched, 1, 'compress: the one embedded image was recompressed');
+  ok(report.textPreserved, 'compress: recompression reports text as preserved');
+  ok(out.length < source.length, `compress: output is smaller (${source.length} -> ${out.length})`);
+  ok(percentSaved(source.length, out.length) > 0, 'compress: a real saving was made');
+
+  // The whole promise of this mode: identical text before and after.
+  const before = await read(source);
+  const after = await read(out);
+  ok(before.opened && after.opened, 'compress: both documents open');
+  eq(after.pages, before.pages, 'compress: page count unchanged');
+  eq(after.text, before.text, 'compress: extracted text is BYTE-IDENTICAL after recompression');
+  ok(after.text.includes(`${SECRET} 1`), 'compress: the text is actually there');
+}
+
+/* ------------------------- 12. compress: what it refuses to touch */
+
+{
+  // A PNG becomes a FlateDecode stream, which this mode leaves alone.
+  const png = await sharp({
+    create: { width: 400, height: 300, channels: 4, background: { r: 10, g: 200, b: 150, alpha: 0.5 } },
+  })
+    .png()
+    .toBuffer();
+
+  const doc = await PDFDocument.create();
+  const embedded = await doc.embedPng(png);
+  doc.addPage([400, 300]).drawImage(embedded, { x: 0, y: 0, width: 400, height: 300 });
+  const source = await doc.save();
+
+  let called = 0;
+  const { report } = await recompressImages(source, {
+    quality: 0.5,
+    maxEdge: null,
+    encode: async () => {
+      called++;
+      return null;
+    },
+  });
+  eq(report.touched, 0, 'compress: a lossless image is not recompressed');
+  eq(called, 0, 'compress: the encoder is never even invoked for it');
+  ok(
+    (report.skipped['not a JPEG'] ?? 0) + (report.skipped.transparency ?? 0) > 0,
+    `compress: it is reported as skipped (${JSON.stringify(report.skipped)})`,
+  );
+}
+
+/* ------------------- 13. compress: an encoder that grows the file is ignored */
+
+{
+  // Gaussian noise, not a flat colour: a flat 900x700 JPEG compresses to about
+  // 4 kB, which lands under the "already small" floor and would be skipped
+  // before the encoder is ever consulted — testing nothing.
+  const photo = await sharp({
+    create: {
+      width: 900,
+      height: 700,
+      channels: 3,
+      background: { r: 90, g: 40, b: 120 },
+      noise: { type: 'gaussian', mean: 128, sigma: 40 },
+    },
+  })
+    .jpeg({ quality: 80 })
+    .toBuffer();
+
+  const doc = await PDFDocument.create();
+  const embedded = await doc.embedJpg(photo);
+  doc.addPage([600, 400]).drawImage(embedded, { x: 0, y: 0, width: 600, height: 400 });
+  const source = await doc.save();
+
+  const { bytes: out, report } = await recompressImages(source, {
+    quality: 1,
+    maxEdge: null,
+    // Deliberately returns something larger than the input.
+    encode: async (input) => ({ bytes: new Uint8Array(input.length + 5000), width: 900, height: 700 }),
+  });
+  eq(report.touched, 0, 'compress: a larger result is rejected');
+  eq(report.skipped['no gain'], 1, 'compress: and reported as "no gain"');
+  ok(out.length <= source.length + 2048, 'compress: the file did not balloon');
+}
+
+/* ---------------------------- 14. compress: flatten rebuilds from images */
+
+{
+  const rendered = await sharp({
+    create: { width: 600, height: 800, channels: 3, background: { r: 240, g: 240, b: 240 } },
+  })
+    .jpeg({ quality: 60 })
+    .toBuffer();
+
+  const { bytes: out, report } = await flattenToImages(50_000, {
+    pages: [
+      { number: 1, width: 595, height: 842 },
+      { number: 2, width: 595, height: 842 },
+    ],
+    renderPage: async () => ({ bytes: new Uint8Array(rendered), width: 600, height: 800 }),
+  });
+
+  ok(!report.textPreserved, 'flatten: reports that text is NOT preserved');
+  eq(report.touched, 2, 'flatten: both pages were rebuilt');
+  const r = await read(out);
+  ok(r.opened, 'flatten: output opens');
+  eq(r.pages, 2, 'flatten: page count matches');
+  eq(r.text.trim(), '', 'flatten: no extractable text remains, as advertised');
+
+  // Page geometry must survive so the result still prints at the right size.
+  const check = await PDFDocument.load(out);
+  const size = check.getPage(0).getSize();
+  ok(
+    Math.abs(size.width - 595) < 1 && Math.abs(size.height - 842) < 1,
+    `flatten: page size preserved in points (${size.width.toFixed(0)}x${size.height.toFixed(0)})`,
+  );
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
