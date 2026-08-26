@@ -108,7 +108,10 @@ const title = `${tool.title} — Nikhil Khilwani`;
     border: 1px solid var(--line);
     border-radius: var(--r);
     padding: 1rem;
-    background: rgba(255, 255, 255, 0.02);
+    /* Opaque, not rgba(255,255,255,.02): a near-transparent panel shows
+       whatever sits behind it, which is exactly what made a paint glitch look
+       like a layout bug. */
+    background: var(--surface);
   }
   @media (max-width: 900px) {
     .switch { position: static; }

@@ -85,8 +85,11 @@ const year = new Date().getFullYear();
     position: relative;
     z-index: 2;
     border-bottom: 1px solid var(--line);
-    background: rgba(7, 8, 12, 0.72);
-    backdrop-filter: blur(10px);
+    /* Opaque, and no backdrop-filter. The header is not sticky, so the filter
+       was blurring a static gradient — invisible, while costing a composited
+       layer that re-samples its backdrop on every scroll frame. The old 72%
+       alpha also let whatever was behind show through the header strip. */
+    background: var(--bg);
   }
   .hdr__in {
     display: flex;

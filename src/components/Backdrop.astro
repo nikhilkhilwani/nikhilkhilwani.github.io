@@ -1,51 +1,44 @@
 ---
-// The drifting auras + masked grid from the landing page, extracted so every
-// page shares one background. Purely decorative, so it is aria-hidden and
-// pointer-events:none.
+// The ambient wash + grid behind every page. Purely decorative, so it is
+// aria-hidden and pointer-events:none.
+//
+// Deliberately ONE fixed layer with an opaque base, painted with soft radial
+// gradients. The earlier version stacked three fixed boxes running
+// `filter: blur(90px)` on a permanent 22s animation, plus a second masked
+// fixed layer — five-plus continuously-invalidated composited layers. That
+// combination produced stale-paint artifacts on real hardware: the page text
+// composited over leftover pixels from a previously viewed page.
+//
+// Radial gradients are already soft, so the blur filter bought nothing that
+// colour stops cannot, and dropping the animation removes the compositor's
+// reason to re-rasterise a full-viewport blurred layer on every frame.
 ---
 
-<div class="aura" aria-hidden="true"><span></span><span></span><span></span></div>
-<div class="mesh" aria-hidden="true"></div>
+<div class="bg" aria-hidden="true"></div>
 
 <style>
-  .aura {
+  .bg {
     position: fixed;
     inset: 0;
     z-index: 0;
     pointer-events: none;
-    overflow: hidden;
-  }
-  .aura span {
-    position: absolute;
-    border-radius: 50%;
-    filter: blur(90px);
-    opacity: 0.35;
-    animation: drift 22s ease-in-out infinite alternate;
-  }
-  .aura span:nth-child(1) {
-    width: 52vmax; height: 52vmax; left: -14vmax; top: -18vmax;
-    background: radial-gradient(circle, #1d4e63, transparent 70%);
-  }
-  .aura span:nth-child(2) {
-    width: 44vmax; height: 44vmax; right: -12vmax; top: 8vmax;
-    background: radial-gradient(circle, #3b2c63, transparent 70%);
-    animation-delay: -7s;
-  }
-  .aura span:nth-child(3) {
-    width: 38vmax; height: 38vmax; left: 22vmax; bottom: -16vmax;
-    background: radial-gradient(circle, #1c5346, transparent 70%);
-    animation-delay: -13s;
-  }
-  @keyframes drift {
-    from { transform: translate3d(0, 0, 0) scale(1); }
-    to { transform: translate3d(4vmax, -3vmax, 0) scale(1.12); }
+    /* Opaque base. Belt-and-braces with body's background: if the compositor
+       ever drops one paint, the other still covers the viewport. */
+    background-color: var(--bg);
+    /* rgba(…, 0) rather than `transparent`, which is rgba(0,0,0,0) and greys
+       the midpoint of a gradient in most engines. */
+    background-image:
+      radial-gradient(52vmax 52vmax at 12% -6%, rgba(29, 78, 99, 0.42), rgba(29, 78, 99, 0) 68%),
+      radial-gradient(44vmax 44vmax at 104% 16%, rgba(59, 44, 99, 0.4), rgba(59, 44, 99, 0) 66%),
+      radial-gradient(40vmax 40vmax at 38% 108%, rgba(28, 83, 70, 0.38), rgba(28, 83, 70, 0) 66%);
   }
 
-  .mesh {
-    position: fixed;
+  /* The grid rides on the same layer as a pseudo-element rather than a second
+     fixed box, so the mask cannot promote a whole extra layer of its own. */
+  .bg::after {
+    content: '';
+    position: absolute;
     inset: 0;
-    z-index: 0;
-    pointer-events: none;
     opacity: 0.5;
     background-image:
       linear-gradient(var(--line) 1px, transparent 1px),
@@ -55,13 +48,7 @@
     mask-image: radial-gradient(ellipse 80% 65% at 50% 30%, #000 20%, transparent 78%);
   }
 
-  /* 90px blur across three 50vmax boxes is real work for a low-end phone GPU. */
   @media (max-width: 640px) {
-    .aura span { filter: blur(60px); opacity: 0.42; }
-    .mesh { background-size: 48px 48px; }
-  }
-
-  @media (prefers-reduced-motion: reduce) {
-    .aura span { animation: none; }
+    .bg::after { background-size: 48px 48px; }
   }
 </style>
