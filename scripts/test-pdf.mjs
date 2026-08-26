@@ -25,6 +25,8 @@ import { protectPdf, classifyPasswordError, inspectEncryption } from '../src/lib
 import { unlockPdf } from '../src/lib/pdf/unlock.ts';
 import { recompressImages, flattenToImages, percentSaved } from '../src/lib/pdf/compress.ts';
 import sharp from 'sharp';
+import { zipSync, strToU8 } from 'fflate';
+import { docxToPdf, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
 import { OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
 
 let fail = 0;
@@ -444,6 +446,141 @@ const plain = await makePlain();
     Math.abs(size.width - 595) < 1 && Math.abs(size.height - 842) < 1,
     `flatten: page size preserved in points (${size.width.toFixed(0)}x${size.height.toFixed(0)})`,
   );
+}
+
+
+/* ------------------------------- 15. word to pdf: the whole pipeline */
+
+{
+  const build = (bodyXml) => {
+    const documentXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body>${bodyXml}</w:body></w:document>`;
+    const contentTypes = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+ <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+ <Default Extension="xml" ContentType="application/xml"/>
+ <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+ <Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>
+ <Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>
+</Types>`;
+    const rootRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>`;
+    const docRels = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+ <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>
+ <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>
+</Relationships>`;
+    // A real numbering definition, without which mammoth cannot emit lists.
+    const numbering = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="."/></w:lvl></w:abstractNum>
+ <w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>
+ <w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>
+ <w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>
+</w:numbering>`;
+    const styles = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+ <w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>
+ <w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/></w:style>
+</w:styles>`;
+    return zipSync({
+      '[Content_Types].xml': strToU8(contentTypes),
+      '_rels/.rels': strToU8(rootRels),
+      'word/document.xml': strToU8(documentXml),
+      'word/_rels/document.xml.rels': strToU8(docRels),
+      'word/numbering.xml': strToU8(numbering),
+      'word/styles.xml': strToU8(styles),
+    });
+  };
+
+  const p = (text) => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+  const li = (text, numId) =>
+    `<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="${numId}"/></w:numPr></w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+
+  const rich = [
+    `<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>Nikhil Khilwani</w:t></w:r></w:p>`,
+    `<w:p><w:r><w:t xml:space="preserve">Accents: José Müller Ståle. </w:t></w:r><w:r><w:rPr><w:b/></w:rPr><w:t>Bold here.</w:t></w:r><w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve"> Italic here.</w:t></w:r></w:p>`,
+    `<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Experience</w:t></w:r></w:p>`,
+    li('Built a data platform', 1),
+    li('Ran the migration', 1),
+    li('First numbered step', 2),
+    li('Second numbered step', 2),
+    `<w:tbl><w:tr><w:tc><w:p><w:r><w:rPr><w:b/></w:rPr><w:t>Region</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Growth</w:t></w:r></w:p></w:tc></w:tr>`,
+    `<w:tr><w:tc><w:p><w:r><w:t>EMEA</w:t></w:r></w:p></w:tc><w:tc><w:p><w:r><w:t>Nineteen percent, a value long enough to wrap inside its own column</w:t></w:r></w:p></w:tc></w:tr></w:tbl>`,
+  ].join('');
+
+  const docx = build(rich);
+  ok(looksLikeDocx(docx), 'word: the fixture is recognised as a .docx');
+
+  const result = await docxToPdf(docx);
+  eq(result.unsupported.length, 0, 'word: no unsupported characters in a Latin document');
+  ok(result.blocks >= 8, `word: parsed ${result.blocks} blocks`);
+  ok(result.pages >= 1, `word: produced ${result.pages} page(s)`);
+
+  const pdf = await pdfjs.getDocument({ data: new Uint8Array(result.bytes), isEvalSupported: false }).promise;
+  let text = '';
+  for (let n = 1; n <= pdf.numPages; n++) {
+    text += (await (await pdf.getPage(n)).getTextContent()).items.map((i) => i.str).join(' ') + ' ';
+  }
+
+  ok(text.includes('Nikhil Khilwani'), 'word: the heading is selectable text, not an image');
+  ok(text.includes('José') && text.includes('Müller'), 'word: Latin-1 accents survive');
+  ok(text.includes('Bold here'), 'word: a bold run keeps its text');
+  ok(text.includes('Italic here'), 'word: an italic run keeps its text');
+  ok(text.includes('Experience'), 'word: the second-level heading is present');
+  ok(text.includes('Built a data platform'), 'word: bullet list content is present');
+  ok(/1\./.test(text) && /2\./.test(text), 'word: numbered list markers are drawn');
+  ok(text.includes('Region') && text.includes('Growth'), 'word: table header cells are present');
+  ok(text.includes('Nineteen percent'), 'word: a wrapped table cell keeps its text');
+
+  /* --- pagination: the part that fails silently --- */
+
+  const many = Array.from({ length: 90 }, (_, i) =>
+    p(`Paragraph number ${i + 1} exists to make this document long enough that the layout has to break it across several pages, which is exactly the behaviour worth checking.`),
+  ).join('');
+  const long = await docxToPdf(build(many));
+  ok(long.pages > 1, `word: a long document paginates (${long.pages} pages)`);
+
+  const longPdf = await pdfjs.getDocument({ data: new Uint8Array(long.bytes), isEvalSupported: false }).promise;
+  let all = '';
+  for (let n = 1; n <= longPdf.numPages; n++) {
+    all += (await (await longPdf.getPage(n)).getTextContent()).items.map((i) => i.str).join(' ') + ' ';
+  }
+  // Every paragraph must survive: losing content silently is the worst failure.
+  const missing = [];
+  for (let i = 1; i <= 90; i++) {
+    if (!all.includes(`Paragraph number ${i} `)) missing.push(i);
+  }
+  eq(missing.length, 0, `word: all 90 paragraphs survive pagination${missing.length ? ` (missing ${missing.slice(0, 5)})` : ''}`);
+
+  /* --- rejections --- */
+
+  let rejected = null;
+  try {
+    await docxToPdf(new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]));
+  } catch (err) {
+    rejected = err?.name;
+  }
+  eq(rejected, 'NotADocx', 'word: a PDF fed to the converter is rejected as not a .docx');
+
+  let empty = null;
+  try {
+    await docxToPdf(build(''));
+  } catch (err) {
+    empty = err?.name;
+  }
+  eq(empty, 'NotADocx', 'word: an empty document is rejected rather than yielding a blank PDF');
+
+  /* --- unsupported characters are reported, not dropped silently --- */
+
+  const hindi = await docxToPdf(build(p('Hello and नमस्ते together')));
+  ok(hindi.unsupported.length > 0, `word: Devanagari is reported (${hindi.unsupported.length} chars)`);
+  ok(describeConversion(hindi).includes('could not be drawn'), 'word: the summary says so plainly');
+  const hindiPdf = await pdfjs.getDocument({ data: new Uint8Array(hindi.bytes), isEvalSupported: false }).promise;
+  const hindiText = (await (await hindiPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join(' ');
+  ok(hindiText.includes('Hello and'), 'word: the Latin part still renders alongside it');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

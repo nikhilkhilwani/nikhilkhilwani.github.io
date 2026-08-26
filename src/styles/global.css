@@ -185,6 +185,24 @@ input[type="range"] {
 
 .mono { font-family: var(--mono); font-size: 0.86rem; letter-spacing: 0; }
 
+/* A <summary> laid out with flex loses its default disclosure marker, which
+   leaves the row looking like static text. Supply one that also shows state. */
+/* list-style removes the standards marker; the WebKit pseudo-element needs its
+   own rule, because grouping an unsupported selector would invalidate both. */
+summary { cursor: pointer; list-style: none; }
+summary::-webkit-details-marker { display: none; }
+summary::before {
+  content: '›';
+  flex: 0 0 auto;
+  margin-right: 0.55em;
+  color: var(--ink-faint);
+  transition: transform 0.18s ease;
+}
+details[open] > summary::before { transform: rotate(90deg); }
+@media (prefers-reduced-motion: reduce) {
+  details > summary::before { transition: none; }
+}
+
 /* Marks a field the tool works fine without. Resets the label's uppercase
    treatment so it reads as an aside rather than part of the field name. */
 .opt {

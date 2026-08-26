@@ -47,6 +47,9 @@ src/
     pdf/protect.ts   AES-256 encryption and permissions
     pdf/unlock.ts    password removal by rebuilding the document
     pdf/compress.ts  image recompression and page flattening
+    docx/blocks.ts   mammoth HTML -> block model (pure, no DOM)
+    docx/layout.ts   line breaking, pagination, tables (pure, injected measurer)
+    docx/topdf.ts    .docx -> PDF, tying mammoth + layout + pdf-lib together
   pages/
     index.astro      landing page
     tools/           one file per tool — the URL is the filename
@@ -56,7 +59,7 @@ scripts/
   sync-pdfjs.mjs     copies pdf.js CMaps/fonts/wasm into public/pdfjs
   test-color.mjs     assertions for the color + contrast math
   test-tools.mjs     assertions for files, raster, QR, limits, and compression logic
-  test-pdf.mjs       encryption + compression verified with pdf.js (runs in CI)
+  test-pdf.mjs       encryption, compression and .docx→PDF verified with pdf.js (runs in CI)
   test-dom.mjs       checks built HTML against the JS that drives it
 public/
   pdfjs/             GENERATED + gitignored — see scripts/sync-pdfjs.mjs
@@ -110,16 +113,24 @@ Without that, Pages keeps serving the old root `index.html` from the branch and 
 - `compress-pdf` takes its image encoder as an argument rather than importing one, so the same
   code path runs under canvas in the browser and under sharp in `scripts/test-pdf.mjs`. That is
   what lets CI verify the promise that recompression leaves text byte-identical.
+- Word→PDF keeps the text as real text rather than rasterising, so it stays selectable and
+  searchable. It is not a Word layout engine: line and page breaks will not match Word, because
+  Word measures with Calibri and Cambria and neither can be redistributed. The page says so.
+- The built-in PDF fonts are WinAnsi only, so Latin-1 accents work but CJK, Devanagari and Arabic
+  do not. Those characters are detected up front and reported, never dropped in silence. Shipping
+  an OFL Unicode TTF would fix it — Fontsource only publishes woff2, which fontkit cannot embed.
+- `docx/blocks.ts` treats unknown tags as transparent AND turns stray text into a paragraph.
+  Losing content without a trace is the worst failure a document converter can have.
 - Input limits live in `src/lib/ui/limits.ts`. Everything runs in the visitor's tab, so passing
   the memory ceiling kills the tab rather than raising an error — files are screened before being
   decoded, and an oversized page is skipped with a suggested scale rather than taken on.
 
 ## Roadmap
 
-All ten tools are live: color converter, contrast checker, palette collection, QR generator,
-image converter, image→PDF, PDF→JPG, compress PDF, protect PDF, unlock PDF.
+All eleven tools are live: color converter, contrast checker, palette collection, QR generator,
+image converter, image→PDF, PDF→JPG, compress PDF, protect PDF, unlock PDF, Word→PDF.
 
-Next: Word→PDF, then possibly PDF→Word.
+Next: possibly PDF→Word — but see the note below before building it.
 
 An earlier version of this file claimed the three PDF security tools needed `qpdf` compiled to
 WASM plus a `coi-serviceworker` shim for `crossOriginIsolated`. That turned out to be wrong.

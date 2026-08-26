@@ -22,6 +22,13 @@ export interface DropzoneOptions {
   onTooLarge?: (rejected: Rejection[], message: string) => void;
   /** Substring/prefix match against file.type, e.g. ['image/'] or ['application/pdf']. */
   accept?: string[];
+  /**
+   * Filename extensions to accept when the OS reports no MIME type at all —
+   * which Windows does for .docx often enough to matter. Deriving one from the
+   * MIME string cannot work for formats whose type bears no relation to their
+   * extension.
+   */
+  extensions?: string[];
   /** Also accept files pasted into the page. */
   paste?: boolean;
   /** Called when a drop contained nothing acceptable. */
@@ -35,13 +42,19 @@ export function initDropzone(inputId: string, options: DropzoneOptions): void {
   const zone = input.closest<HTMLElement>('.dz');
   const accept = options.accept ?? [];
 
+  const extensions = (options.extensions ?? []).map((e) =>
+    e.startsWith('.') ? e.toLowerCase() : `.${e.toLowerCase()}`,
+  );
+
   const matches = (file: File): boolean => {
-    if (!accept.length) return true;
-    // Some browsers report an empty type for uncommon extensions; fall back to
-    // the filename so those are not silently dropped.
-    if (!file.type) {
-      return accept.some((a) => file.name.toLowerCase().endsWith(a.replace(/^.*\//, '.')));
-    }
+    if (!accept.length && !extensions.length) return true;
+
+    const byExtension = extensions.some((e) => file.name.toLowerCase().endsWith(e));
+    if (byExtension) return true;
+
+    // Some systems report an empty type for less common formats; the extension
+    // list above is the reliable fallback for those.
+    if (!file.type) return false;
     return accept.some((a) => file.type.startsWith(a));
   };
 

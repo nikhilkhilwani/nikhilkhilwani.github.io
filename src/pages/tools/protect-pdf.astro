@@ -449,6 +449,7 @@ const PERMS = [
 
   initDropzone('pp-file', {
     accept: ['application/pdf'],
+    extensions: ['.pdf'],
     maxBytes: LIMITS.pdf,
     onTooLarge: (_r, message) => {
       errEl.textContent = message;

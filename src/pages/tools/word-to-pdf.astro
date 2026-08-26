@@ -1,0 +1,294 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+import { PAGE_SIZES } from '../../lib/docx/layout';
+import { LAYOUT_CAVEATS } from '../../lib/docx/topdf';
+---
+
+<ToolLayout slug="word-to-pdf">
+  <div class="wp">
+    <Dropzone
+      id="wp-file"
+      accept="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+      icon="file-text"
+      label="Choose a .docx, or drop one anywhere"
+      hint="Converted in this tab. The text stays real text — selectable, searchable and copyable."
+    />
+
+    <section class="panel" id="wp-form" hidden>
+      <div class="wp__grid">
+        <div class="field">
+          <label for="wp-size">Page size</label>
+          <select id="wp-size">
+            {PAGE_SIZES.map((p) => <option value={p.id} selected={p.id === 'a4'}>{p.label}</option>)}
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="wp-body">Body text size <output id="wp-body-out">11 pt</output></label>
+          <input id="wp-body" type="range" min="9" max="14" step="0.5" value="11" />
+        </div>
+      </div>
+
+      <p class="wp__stats" id="wp-stats"></p>
+
+      <div class="wp__actions">
+        <button id="wp-run" class="btn btn--solid btn--sm" type="button">
+          <Icon name="file-text" size={15} /> Convert to PDF
+        </button>
+        <button id="wp-clear" class="btn btn--sm" type="button">
+          <Icon name="trash" size={15} /> Clear
+        </button>
+      </div>
+
+      <details class="wp__caveats">
+        <summary>What this does and does not reproduce</summary>
+        <p>
+          Headings, paragraphs, bold and italic, bullet and numbered lists,
+          tables and inline images all come across, and the text remains
+          selectable. These do not:
+        </p>
+        <ul>
+          {LAYOUT_CAVEATS.map((c) => <li>{c}</li>)}
+        </ul>
+      </details>
+
+      <p class="wp__err" id="wp-err" role="status" aria-live="polite"></p>
+    </section>
+
+    <ul class="wp__result" id="wp-result"></ul>
+  </div>
+</ToolLayout>
+
+<style>
+  .wp { display: grid; gap: clamp(14px, 2vw, 20px); }
+
+  .wp__grid { display: grid; gap: 1.15rem; }
+  @media (min-width: 640px) {
+    .wp__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  }
+  .wp__grid .field > label { display: flex; justify-content: space-between; gap: 0.5rem; }
+  .wp__grid output { font-family: var(--mono); color: var(--ink-dim); }
+
+  .wp__stats {
+    margin: 1.2rem 0 0;
+    font-size: 0.82rem;
+    color: var(--ink-dim);
+    font-family: var(--mono);
+    min-height: 1em;
+  }
+
+  .wp__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.2rem; }
+
+  .wp__err { margin: 0.6rem 0 0; font-size: 0.8rem; color: var(--bad); min-height: 1em; line-height: 1.5; }
+
+  .wp__caveats {
+    margin-top: 1.4rem;
+    border-top: 1px solid var(--line);
+    padding-top: 1rem;
+    font-size: 0.84rem;
+    color: var(--ink-dim);
+  }
+  .wp__caveats summary {
+    cursor: pointer;
+    color: var(--ink-dim);
+    font-size: 0.8rem;
+    min-height: 32px;
+    display: flex;
+    align-items: center;
+  }
+  .wp__caveats summary:hover { color: var(--ink); }
+  .wp__caveats p { margin: 0.7rem 0 0; line-height: 1.6; max-width: 62ch; }
+  .wp__caveats ul { margin: 0.5rem 0 0; padding-left: 1.2rem; line-height: 1.75; }
+
+  .wp__result { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+</style>
+
+<!-- Runtime-created elements need global rules: Astro appends
+     [data-astro-cid-…] to scoped selectors, and document.createElement() nodes
+     never carry that attribute. Namespaced under this page's own list class. -->
+
+<style is:global>
+  .wp__result .done {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    background: var(--surface);
+    border: 1px solid color-mix(in srgb, var(--good) 35%, var(--line));
+    border-radius: var(--r-sm);
+    padding: 0.8rem 0.9rem;
+  }
+  .wp__result .done__icon { color: var(--good); flex: 0 0 auto; display: grid; place-items: center; padding-top: 2px; }
+  .wp__result .done__text { display: flex; flex-direction: column; gap: 0.3rem; min-width: 0; flex: 1 1 16rem; }
+  .wp__result .done__name { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .wp__result .done__size { font-size: 0.8rem; color: var(--ink-dim); font-family: var(--mono); }
+  .wp__result .done__note { font-size: 0.8rem; color: var(--ink-faint); line-height: 1.55; }
+  .wp__result .done__warn { font-size: 0.8rem; color: var(--warn); line-height: 1.55; }
+</style>
+
+<script>
+  import { initDropzone } from '../../lib/ui/dropzone';
+  import { downloadBlob } from '../../lib/ui/download';
+  import { toast } from '../../lib/ui/clipboard';
+  import { formatBytes, stemOf } from '../../lib/ui/files';
+  import { LIMITS } from '../../lib/ui/limits';
+  import { PAGE_SIZES, DEFAULT_SCALE } from '../../lib/docx/layout';
+  import { docxToPdf, describeConversion, looksLikeDocx, NotADocx, type ConvertResult } from '../../lib/docx/topdf';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const form = $<HTMLElement>('wp-form');
+  const sizeSel = $<HTMLSelectElement>('wp-size');
+  const bodySize = $<HTMLInputElement>('wp-body');
+  const bodyOut = $<HTMLOutputElement>('wp-body-out');
+  const stats = $<HTMLParagraphElement>('wp-stats');
+  const runBtn = $<HTMLButtonElement>('wp-run');
+  const clearBtn = $<HTMLButtonElement>('wp-clear');
+  const errEl = $<HTMLParagraphElement>('wp-err');
+  const result = $<HTMLUListElement>('wp-result');
+
+  let file: File | null = null;
+  let bytes: Uint8Array | null = null;
+  let busy = false;
+
+  function syncControls() {
+    bodyOut.textContent = `${bodySize.value} pt`;
+  }
+
+  async function accept() {
+    if (!file) return;
+    errEl.textContent = '';
+    result.replaceChildren();
+
+    bytes = new Uint8Array(await file.arrayBuffer());
+
+    // A .doc is a completely different binary format; say so before converting.
+    if (!looksLikeDocx(bytes)) {
+      form.hidden = true;
+      errEl.textContent = new NotADocx().message;
+      return;
+    }
+
+    form.hidden = false;
+    stats.textContent = `${file.name} · ${formatBytes(file.size)}`;
+    syncControls();
+  }
+
+  async function run() {
+    if (!bytes || !file || busy) return;
+
+    busy = true;
+    runBtn.disabled = true;
+    const label = runBtn.innerHTML;
+    runBtn.textContent = 'Converting…';
+    errEl.textContent = '';
+    result.replaceChildren();
+
+    try {
+      const geometry = PAGE_SIZES.find((p) => p.id === sizeSel.value)?.geometry;
+      const body = Number(bodySize.value) || DEFAULT_SCALE.body;
+      // Headings scale with the body size so the hierarchy holds at any setting.
+      const ratio = body / DEFAULT_SCALE.body;
+
+      const out = await docxToPdf(bytes, {
+        geometry,
+        scale: {
+          body,
+          h1: DEFAULT_SCALE.h1 * ratio,
+          h2: DEFAULT_SCALE.h2 * ratio,
+          h3: DEFAULT_SCALE.h3 * ratio,
+          lineHeight: DEFAULT_SCALE.lineHeight,
+        },
+      });
+
+      const name = `${stemOf(file.name)}.pdf`;
+      const blob = new Blob([out.bytes.slice().buffer as ArrayBuffer], { type: 'application/pdf' });
+      downloadBlob(blob, name);
+      showResult(name, out, blob.size);
+      toast(`${out.pages} page${out.pages === 1 ? '' : 's'} converted`);
+    } catch (err) {
+      errEl.textContent =
+        err instanceof NotADocx
+          ? err.message
+          : err instanceof Error
+            ? `Could not convert: ${err.message}`
+            : 'Could not convert';
+    } finally {
+      busy = false;
+      runBtn.innerHTML = label;
+      runBtn.disabled = false;
+    }
+  }
+
+  function showResult(name: string, out: ConvertResult, size: number) {
+    const li = document.createElement('li');
+    li.className = 'done';
+
+    const icon = document.createElement('span');
+    icon.className = 'done__icon';
+    icon.innerHTML =
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>';
+
+    const text = document.createElement('span');
+    text.className = 'done__text';
+
+    const nm = document.createElement('span');
+    nm.className = 'done__name';
+    nm.textContent = name;
+
+    const sz = document.createElement('span');
+    sz.className = 'done__size';
+    sz.textContent = `${out.pages} page${out.pages === 1 ? '' : 's'} · ${formatBytes(size)}`;
+
+    const note = document.createElement('span');
+    note.className = 'done__note';
+    note.textContent = describeConversion(out);
+
+    text.append(nm, sz, note);
+
+    // Anything mammoth flagged about the source belongs in front of the reader,
+    // not swallowed.
+    if (out.notes.length) {
+      const warn = document.createElement('span');
+      warn.className = 'done__warn';
+      warn.textContent = out.notes.slice(0, 2).join(' ');
+      text.append(warn);
+    }
+
+    li.append(icon, text);
+    result.replaceChildren(li);
+  }
+
+  initDropzone('wp-file', {
+    // Some systems report an empty type for .docx, so initDropzone falls back
+    // to the filename extension.
+    accept: ['application/vnd.openxmlformats-officedocument.wordprocessingml.document'],
+    extensions: ['.docx'],
+    maxBytes: LIMITS.pdf,
+    onTooLarge: (_r, message) => {
+      errEl.textContent = message;
+      form.hidden = true;
+    },
+    onFiles: (files) => {
+      file = files[0];
+      void accept();
+    },
+    onReject: () => toast('That is not a .docx file'),
+  });
+
+  form.addEventListener('input', syncControls);
+  runBtn.addEventListener('click', () => void run());
+
+  clearBtn.addEventListener('click', () => {
+    file = null;
+    bytes = null;
+    form.hidden = true;
+    errEl.textContent = '';
+    stats.textContent = '';
+    result.replaceChildren();
+  });
+
+  syncControls();
+</script>

@@ -21,6 +21,8 @@ import {
   canvasPixelsFor, exceedsCanvasBudget, largestSafeScale,
 } from '../src/lib/ui/limits.ts';
 import { classifyImage, percentSaved, describeReport, isNoOp } from '../src/lib/pdf/compress.ts';
+import { parseBlocks, tidyRuns, decodeEntities, unsupportedCharacters, blockText } from '../src/lib/docx/blocks.ts';
+import { wrapRuns, layout, columnWidths, A4, DEFAULT_SCALE } from '../src/lib/docx/layout.ts';
 
 let fail = 0;
 let pass = 0;
@@ -418,6 +420,165 @@ ok(describeReport(rep({ after: 1200 })).includes('20% larger'), 'growth is descr
 ok(isNoOp(rep({ touched: 0 })), 'recompressing nothing is a no-op');
 ok(!isNoOp(rep({ touched: 1 })), 'touching one image is not a no-op');
 ok(!isNoOp(rep({ textPreserved: false, touched: 0 })), 'flattening is never reported as a no-op');
+
+
+/* --------------------------------------------------------- docx: blocks */
+
+eq(decodeEntities('a &amp; b'), 'a & b', 'decodes &amp;');
+eq(decodeEntities('&lt;tag&gt;'), '<tag>', 'decodes angle brackets');
+eq(decodeEntities('&#8212;'), '—', 'decodes a numeric entity');
+eq(decodeEntities('&#x2014;'), '—', 'decodes a hex entity');
+eq(decodeEntities('&mdash;&nbsp;x'), '— x', 'decodes named entities');
+eq(decodeEntities('&notreal;'), '&notreal;', 'leaves an unknown entity alone');
+
+deep(tidyRuns([{ text: 'a' }, { text: 'b' }]), [{ text: 'ab' }], 'merges adjacent plain runs');
+deep(
+  tidyRuns([{ text: 'a' }, { text: 'b', bold: true }]),
+  [{ text: 'a' }, { text: 'b', bold: true }],
+  'keeps differently styled runs apart',
+);
+deep(tidyRuns([{ text: '' }, { text: 'x' }]), [{ text: 'x' }], 'drops empty runs');
+deep(tidyRuns([{ text: '  a   b  ' }]), [{ text: 'a b' }], 'collapses and trims whitespace');
+
+{
+  const blocks = parseBlocks('<h1>Title</h1><p>Body <strong>bold</strong> and <em>italic</em>.</p>');
+  eq(blocks.length, 2, 'heading and paragraph parsed');
+  eq(blocks[0].kind, 'heading', 'first block is a heading');
+  eq(blocks[0].level, 1, 'h1 becomes level 1');
+  eq(blockText(blocks[0]), 'Title', 'heading text');
+  eq(blocks[1].kind, 'paragraph', 'second block is a paragraph');
+  const styled = blocks[1].runs;
+  ok(styled.some((r) => r.bold && r.text === 'bold'), 'bold run preserved');
+  ok(styled.some((r) => r.italic && r.text === 'italic'), 'italic run preserved');
+}
+
+eq(parseBlocks('<h2>A</h2>')[0].level, 2, 'h2 becomes level 2');
+eq(parseBlocks('<h6>A</h6>')[0].level, 3, 'h6 clamps to level 3');
+
+{
+  const blocks = parseBlocks('<ul><li>one</li><li>two</li></ul>');
+  eq(blocks.length, 2, 'two list items');
+  eq(blocks[0].kind, 'listItem', 'parsed as a list item');
+  eq(blocks[0].ordered, false, 'ul is unordered');
+  eq(blocks[0].marker, '•', 'bullet marker');
+}
+{
+  const blocks = parseBlocks('<ol><li>one</li><li>two</li><li>three</li></ol>');
+  deep(blocks.map((b) => b.marker), ['1.', '2.', '3.'], 'ol numbers its items in order');
+  ok(blocks.every((b) => b.ordered), 'ol items are ordered');
+}
+{
+  const blocks = parseBlocks('<ul><li>a<ul><li>b</li></ul></li></ul>');
+  ok(blocks.some((b) => b.level === 2), 'a nested list reports a deeper level');
+}
+
+{
+  const blocks = parseBlocks('<table><tr><td><p>A</p></td><td><p>B</p></td></tr></table>');
+  eq(blocks.length, 1, 'a table is one block');
+  eq(blocks[0].kind, 'table', 'parsed as a table');
+  eq(blocks[0].rows.length, 1, 'one row');
+  eq(blocks[0].rows[0].length, 2, 'two cells');
+  eq(blocks[0].rows[0][0][0].text, 'A', 'cell content preserved');
+}
+eq(
+  parseBlocks('<table><tr><th><p>H</p></th></tr></table>')[0].rows[0][0][0].text,
+  'H',
+  'th is treated as a cell',
+);
+
+eq(parseBlocks('<p>x</p><hr /><p>y</p>').filter((b) => b.kind === 'rule').length, 1, 'hr becomes a rule');
+eq(
+  parseBlocks('<p><img src="data:image/png;base64,AAA" /></p>').filter((b) => b.kind === 'image').length,
+  1,
+  'a data-URI image becomes an image block',
+);
+eq(
+  parseBlocks('<p><img src="https://example.com/a.png" /></p>').filter((b) => b.kind === 'image').length,
+  0,
+  'a remote image is not embedded — it cannot be fetched',
+);
+eq(
+  blockText(parseBlocks('<div><span>text in unknown tags</span></div>')[0]),
+  'text in unknown tags',
+  'unknown tags are transparent, so no content is lost',
+);
+deep(parseBlocks(''), [], 'empty HTML yields no blocks');
+deep(parseBlocks('<p></p>'), [], 'an empty paragraph yields no block');
+
+deep(unsupportedCharacters(parseBlocks('<p>José Müller</p>')), [], 'Latin-1 accents are supported');
+ok(unsupportedCharacters(parseBlocks('<p>नमस्ते hello</p>')).length > 0, 'Devanagari is reported as unsupported');
+deep(unsupportedCharacters(parseBlocks('<p>an em—dash and a bullet •</p>')), [], 'punctuation WinAnsi covers is not flagged');
+
+/* --------------------------------------------------------- docx: layout */
+
+// A predictable measurer: every character is exactly half the font size wide.
+const half = (text, style) => text.length * style.size * 0.5;
+
+{
+  const lines = wrapRuns([{ text: 'aaaa bbbb cccc' }], 10, 25, half);
+  eq(lines.length, 3, 'wraps at the available width');
+  eq(lines[0].pieces.map((p) => p.text).join(''), 'aaaa', 'first line holds one word');
+}
+eq(wrapRuns([{ text: 'short' }], 10, 500, half).length, 1, 'text that fits stays on one line');
+eq(
+  wrapRuns([{ text: 'enormouslylongsingleword' }], 10, 20, half).length,
+  1,
+  'a word longer than the line is placed rather than looping forever',
+);
+{
+  // Wrapping must work ACROSS runs, so styling never forces a break.
+  const lines = wrapRuns([{ text: 'aa ' }, { text: 'bb', bold: true }, { text: ' cc' }], 10, 500, half);
+  eq(lines.length, 1, 'styled runs share a line');
+  ok(lines[0].pieces.some((p) => p.bold), 'the bold piece is on that line');
+}
+{
+  const lines = wrapRuns([{ text: 'aaaa bbbb' }], 10, 25, half);
+  eq(lines.length, 2, 'two words wrap at a 25pt width');
+  ok(!/^\s/.test(lines[1].pieces[0].text), 'a wrapped line never starts with whitespace');
+}
+deep(wrapRuns([], 10, 100, half), [], 'no runs means no lines');
+
+deep(columnWidths(2, 108, 8), [50, 50], 'two columns split the width minus the gap');
+eq(columnWidths(3, 200, 10).length, 3, 'three columns');
+ok(columnWidths(20, 100, 8).every((w) => w >= 24), 'columns never collapse below a floor');
+deep(columnWidths(0, 100), [], 'zero columns yields nothing');
+
+{
+  // Pagination: enough paragraphs that one page cannot hold them.
+  const many = Array.from({ length: 60 }, () => ({
+    kind: 'paragraph',
+    runs: [{ text: 'This is a paragraph with enough words in it to occupy a couple of lines each time.' }],
+  }));
+  const pages = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure: half });
+  ok(pages.length > 1, `long input paginates (${pages.length} pages)`);
+
+  // Nothing may be dropped: every paragraph must appear somewhere.
+  const drawn = pages
+    .flatMap((p) => p.items)
+    .filter((i) => i.kind === 'line')
+    .flatMap((i) => i.line.pieces)
+    .map((p) => p.text)
+    .join(' ');
+  eq((drawn.match(/paragraph/g) ?? []).length, 60, 'every paragraph survives pagination');
+
+  // Nothing may be drawn outside the page.
+  const off = pages.flatMap((p) => p.items).filter((i) => i.y < 0 || i.y > A4.height);
+  eq(off.length, 0, 'nothing is laid out off the page');
+}
+eq(
+  layout([{ kind: 'paragraph', runs: [{ text: 'one line' }] }], { geometry: A4, scale: DEFAULT_SCALE, measure: half }).length,
+  1,
+  'a short document is a single page',
+);
+deep(layout([], { geometry: A4, scale: DEFAULT_SCALE, measure: half }), [], 'no blocks means no pages');
+{
+  const pages = layout([{ kind: 'table', rows: [[[{ text: 'A' }], [{ text: 'B' }]]] }], {
+    geometry: A4,
+    scale: DEFAULT_SCALE,
+    measure: half,
+  });
+  eq(pages[0].items.filter((i) => i.kind === 'cellBox').length, 2, 'a table row draws one box per cell');
+}
 
 /* -------------------------------------------------------------------- end */
 
