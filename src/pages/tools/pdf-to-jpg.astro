@@ -140,7 +140,16 @@ const SCALES = [
     gap: 0.6rem;
     grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
   }
-  .page {
+</style>
+
+<!-- Runtime-created elements need global rules. Astro scopes a page's <style>
+     by appending [data-astro-cid-…] to every selector, and elements built with
+     document.createElement never carry that attribute — so scoped rules simply
+     do not apply to them. Each rule below is namespaced under this page's own
+     container class, which keeps it from leaking to other pages. -->
+
+<style is:global>
+  .pj__grid-out .page {
     border: 1px solid var(--line);
     border-radius: var(--r-sm);
     background: var(--surface);
@@ -148,15 +157,15 @@ const SCALES = [
     display: flex;
     flex-direction: column;
   }
-  .page__img {
+  /* No fixed aspect-ratio: a landscape page would letterbox inside a portrait
+     box. The natural ratio drives the height instead. */
+  .pj__grid-out .page__img {
     display: block;
     width: 100%;
     height: auto;
     background: #fff;
-    aspect-ratio: 1 / 1.294;
-    object-fit: contain;
   }
-  .page__foot {
+  .pj__grid-out .page__foot {
     display: flex;
     align-items: center;
     justify-content: space-between;
@@ -164,8 +173,12 @@ const SCALES = [
     padding: 0.4rem 0.35rem 0.4rem 0.55rem;
     border-top: 1px solid var(--line);
   }
-  .page__no { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); }
-  .page__save {
+  .pj__grid-out .page__no {
+    font-family: var(--mono);
+    font-size: 0.72rem;
+    color: var(--ink-faint);
+  }
+  .pj__grid-out .page__save {
     font: inherit;
     display: grid;
     place-items: center;
@@ -178,7 +191,7 @@ const SCALES = [
     cursor: pointer;
     transition: color 0.18s, border-color 0.18s;
   }
-  .page__save:hover { color: var(--accent); border-color: var(--accent); }
+  .pj__grid-out .page__save:hover { color: var(--accent); border-color: var(--accent); }
 </style>
 
 <script>

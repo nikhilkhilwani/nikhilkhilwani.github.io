@@ -115,7 +115,16 @@ const PAGE_SIZES = [
     counter-reset: page;
   }
 
-  .prow {
+</style>
+
+<!-- Runtime-created elements need global rules. Astro scopes a page's <style>
+     by appending [data-astro-cid-…] to every selector, and elements built with
+     document.createElement never carry that attribute — so scoped rules simply
+     do not apply to them. Each rule below is namespaced under this page's own
+     list class, which keeps it from leaking to other pages. -->
+
+<style is:global>
+  .ip__list .prow {
     display: grid;
     grid-template-columns: auto 46px minmax(0, 1fr) auto;
     gap: 0.75rem;
@@ -125,12 +134,12 @@ const PAGE_SIZES = [
     border-radius: var(--r-sm);
     padding: 0.5rem 0.6rem;
   }
-  .prow[draggable='true'] { cursor: grab; }
-  .prow[data-dragging] { opacity: 0.45; }
-  .prow[data-dropbefore] { box-shadow: 0 -2px 0 0 var(--accent); }
-  .prow[data-dropafter] { box-shadow: 0 2px 0 0 var(--accent); }
+  .ip__list .prow[draggable='true'] { cursor: grab; }
+  .ip__list .prow[data-dragging] { opacity: 0.45; }
+  .ip__list .prow[data-dropbefore] { box-shadow: 0 -2px 0 0 var(--accent); }
+  .ip__list .prow[data-dropafter] { box-shadow: 0 2px 0 0 var(--accent); }
 
-  .prow__no {
+  .ip__list .prow__no {
     counter-increment: page;
     font-family: var(--mono);
     font-size: 0.78rem;
@@ -138,9 +147,9 @@ const PAGE_SIZES = [
     min-width: 1.6em;
     text-align: right;
   }
-  .prow__no::before { content: counter(page); }
+  .ip__list .prow__no::before { content: counter(page); }
 
-  .prow__thumb {
+  .ip__list .prow__thumb {
     width: 46px;
     height: 46px;
     border-radius: 7px;
@@ -148,14 +157,19 @@ const PAGE_SIZES = [
     background: var(--surface-2);
     overflow: hidden;
   }
-  .prow__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .ip__list .prow__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
 
-  .prow__meta { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
-  .prow__name { font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .prow__sub { font-size: 0.75rem; color: var(--ink-faint); font-family: var(--mono); }
+  .ip__list .prow__meta { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+  .ip__list .prow__name {
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .ip__list .prow__sub { font-size: 0.75rem; color: var(--ink-faint); font-family: var(--mono); }
 
-  .prow__btns { display: flex; gap: 0.25rem; }
-  .iconbtn {
+  .ip__list .prow__btns { display: flex; gap: 0.25rem; }
+  .ip__list .iconbtn {
     font: inherit;
     display: grid;
     place-items: center;
@@ -168,9 +182,9 @@ const PAGE_SIZES = [
     cursor: pointer;
     transition: color 0.18s, border-color 0.18s;
   }
-  .iconbtn:hover { color: var(--accent); border-color: var(--accent); }
-  .iconbtn[disabled] { opacity: 0.35; cursor: default; }
-  .iconbtn[disabled]:hover { color: var(--ink-dim); border-color: var(--line); }
+  .ip__list .iconbtn:hover { color: var(--accent); border-color: var(--accent); }
+  .ip__list .iconbtn[disabled] { opacity: 0.35; cursor: default; }
+  .ip__list .iconbtn[disabled]:hover { color: var(--ink-dim); border-color: var(--line); }
 </style>
 
 <script>

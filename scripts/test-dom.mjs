@@ -10,6 +10,10 @@
  *      points at an id that exists on that page
  *   3. every id-shaped string literal in the JavaScript a page loads (following
  *      static and dynamic imports) matches an id in that page's HTML
+ *   4. every class name assigned at RUNTIME has at least one unscoped CSS rule.
+ *      Astro appends [data-astro-cid-…] to each selector in a page's <style>,
+ *      and document.createElement() nodes never carry that attribute — so a
+ *      scoped rule silently does not apply and the element renders unstyled.
  *
  * (3) is the one that earns its keep: it is exactly the failure that would
  * otherwise ship as a dead button.
@@ -192,9 +196,46 @@ for (const htmlPath of htmlFiles.sort()) {
     problem(`${route} script references #${id} (in ${where}) but no such id is in the HTML`);
   }
 
+  /* --- 4. runtime-assigned classes must have an unscoped rule ---------- */
+  // Astro rewrites every selector in a page's <style> to
+  // `.foo[data-astro-cid-xxxx]`. Nodes built with document.createElement never
+  // carry that attribute, so such a rule never matches them and the element
+  // renders with browser defaults. This catches that silently-broken case.
+  let css = [...html.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map((m) => m[1]).join('\n');
+  for (const href of [...html.matchAll(/<link[^>]+rel="stylesheet"[^>]+href="([^"]+)"/g)].map((m) => m[1])) {
+    if (!href.startsWith('/')) continue;
+    css += '\n' + ((await readFile(join(DIST, href), 'utf8').catch(() => '')) || '');
+  }
+
+  const runtimeClasses = new Set();
+  for (const { path, js } of sources) {
+    if (!isOurChunk(path, OUR_STEMS)) continue;
+    for (const re of [
+      /\.className\s*=\s*["']([^"']+)["']/g,
+      /classList\.add\(\s*["']([^"']+)["']/g,
+    ]) {
+      for (const m of js.matchAll(re)) {
+        for (const cls of m[1].split(/\s+/)) if (cls) runtimeClasses.add(cls);
+      }
+    }
+  }
+
+  for (const cls of runtimeClasses) {
+    const esc = cls.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const unscoped = new RegExp('\\.' + esc + '(?![\\w-])(?!\\[data-astro-cid)').test(css);
+    const scoped = new RegExp('\\.' + esc + '(?![\\w-])\\[data-astro-cid').test(css);
+    checks++;
+    if (scoped && !unscoped) {
+      problem(
+        `${route} .${cls} is assigned at runtime but every CSS rule for it is ` +
+          `Astro-scoped — createElement nodes lack [data-astro-cid], so it renders unstyled`,
+      );
+    }
+  }
+
   const scanned = sources.filter((s) => isOurChunk(s.path, OUR_STEMS)).length;
   console.log(
-    `ok   ${route.padEnd(30)} ${idSet.size} ids · ${scanned}/${sources.length} chunk(s) scanned · ${refs.length} ref(s)`,
+    `ok   ${route.padEnd(30)} ${idSet.size} ids · ${scanned}/${sources.length} chunk(s) · ${refs.length} refs · ${runtimeClasses.size} runtime classes`,
   );
 }
 
