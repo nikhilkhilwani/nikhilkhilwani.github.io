@@ -97,7 +97,7 @@ export const tools: ToolMeta[] = [
     title: 'Protect PDF',
     description: 'Add AES-256 password protection to a PDF without it ever leaving your device.',
     icon: 'lock',
-    status: 'coming-soon',
+    status: 'available',
     category: 'pdf',
   },
   {

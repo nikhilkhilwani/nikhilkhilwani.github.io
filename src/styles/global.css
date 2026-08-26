@@ -118,6 +118,9 @@ a { color: inherit; }
 
 input[type="text"],
 input[type="number"],
+input[type="password"],
+input[type="email"],
+input[type="search"],
 select,
 textarea {
   font: inherit;

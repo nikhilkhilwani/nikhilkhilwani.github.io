@@ -357,7 +357,7 @@ const PAGE_SIZES = [
     errEl.textContent = '';
 
     try {
-      const { PDFDocument } = await import('pdf-lib');
+      const { PDFDocument } = await import('@cantoo/pdf-lib');
       const doc = await PDFDocument.create();
       doc.setProducer('nikhilkhilwani.github.io');
       doc.setCreator('nikhilkhilwani.github.io/tools/image-to-pdf');

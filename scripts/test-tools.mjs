@@ -15,6 +15,7 @@ import {
   normalizeUrlish, escapeMicroformat,
 } from '../src/lib/qr/qr.ts';
 import { fitWithin } from '../src/lib/img/raster.ts';
+import { passwordStrength, describePermissions, OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
 
 let fail = 0;
 let pass = 0;
@@ -211,6 +212,52 @@ eq(normalizeUrlish('https://x.dev'), 'https://x.dev', 'existing scheme is left a
 eq(normalizeUrlish('mailto:a@b.co'), 'mailto:a@b.co', 'non-http scheme is left alone');
 eq(normalizeUrlish('just some text'), 'just some text', 'plain text is not turned into a URL');
 eq(normalizeUrlish('  '), '', 'blank input stays blank');
+
+/* ------------------------------------------------------------- protect-pdf */
+
+// Length is the dominant factor on purpose: a long lowercase passphrase should
+// out-score a short mangled word.
+eq(passwordStrength('').score, 0, 'empty password scores 0');
+eq(passwordStrength('').label, 'Empty', 'empty password is labelled');
+eq(passwordStrength('abc').score, 0, 'under 6 chars scores 0');
+eq(passwordStrength('abc').label, 'Too short', 'short password says so');
+eq(passwordStrength('abcdefg').score, 1, '7 lowercase chars score 1');
+eq(passwordStrength('abcdefghij').score, 1, '10 lowercase only is penalised to 1');
+eq(passwordStrength('Abcdef1!').score, 2, '8 chars with 4 classes scores 2');
+eq(passwordStrength('Abcdefgh12!').score, 3, '11 chars with 4 classes scores 3');
+eq(passwordStrength('correcthorsebatterystaple').score, 4, 'a long passphrase reaches 4');
+ok(
+  passwordStrength('correcthorsebatterystaple').score > passwordStrength('Xy7!q').score,
+  'long passphrase beats a short mangled word',
+);
+for (const pw of ['', 'a', 'abcdef', 'Abcdef1!', 'x'.repeat(40)]) {
+  const s = passwordStrength(pw);
+  ok(s.score >= 0 && s.score <= 4, `score stays in range for ${JSON.stringify(pw.slice(0, 8))}`);
+  ok(!!s.label && !!s.hint, 'every score has a label and a hint');
+}
+
+eq(
+  describePermissions(OPEN_PERMISSIONS),
+  'No restrictions — the password is only needed to open the file.',
+  'all-allowed permissions read as unrestricted',
+);
+ok(
+  describePermissions({ ...OPEN_PERMISSIONS, printing: false }).includes('block printing'),
+  'blocked printing is described',
+);
+ok(
+  describePermissions({ ...OPEN_PERMISSIONS, printing: 'lowResolution' }).includes('high-quality printing'),
+  'low-resolution printing is described',
+);
+ok(
+  describePermissions({ ...OPEN_PERMISSIONS, copying: false, modifying: false }).includes(' and '),
+  'two restrictions are joined with "and"',
+);
+eq(
+  describePermissions({ printing: false, copying: false, modifying: false, annotating: false, fillingForms: false }),
+  'Readers that honour permissions will block printing, copying text, editing, commenting and filling forms.',
+  'all restrictions listed in order',
+);
 
 /* -------------------------------------------------------------------- end */
 

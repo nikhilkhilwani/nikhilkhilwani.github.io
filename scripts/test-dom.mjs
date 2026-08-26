@@ -149,6 +149,10 @@ for (const htmlPath of htmlFiles.sort()) {
   /* --- 1. ids unique -------------------------------------------------- */
   const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
   const idSet = new Set(ids);
+
+  // Form-control names follow the same naming convention as ids and are equally
+  // valid selector targets (input[name="pp-mode"]), so they count as resolved.
+  const nameSet = new Set([...html.matchAll(/\sname="([^"]+)"/g)].map((m) => m[1]));
   checks++;
   if (ids.length !== idSet.size) {
     const dupes = ids.filter((id, i) => ids.indexOf(id) !== i);
@@ -186,7 +190,7 @@ for (const htmlPath of htmlFiles.sort()) {
     for (const literal of stringLiterals(js)) {
       if (!ID_SHAPE.test(literal) || NOT_IDS.has(literal)) continue;
       checks++;
-      if (!idSet.has(literal)) {
+      if (!idSet.has(literal) && !nameSet.has(literal)) {
         if (!missing.has(literal)) missing.set(literal, basename(path));
       }
     }

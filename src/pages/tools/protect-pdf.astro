@@ -1,0 +1,500 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+import { CIPHERS } from '../../lib/pdf/protect';
+
+const PERMS = [
+  { id: 'copying', label: 'Copying text' },
+  { id: 'modifying', label: 'Editing' },
+  { id: 'annotating', label: 'Commenting' },
+  { id: 'fillingForms', label: 'Filling forms' },
+];
+---
+
+<ToolLayout slug="protect-pdf">
+  <div class="pp">
+    <Dropzone
+      id="pp-file"
+      accept="application/pdf"
+      icon="lock"
+      label="Choose a PDF, or drop one anywhere"
+      hint="Encrypted here in this tab with AES-256. The file and the password never leave your device."
+    />
+
+    <section class="panel" id="pp-source" hidden>
+      <div class="field">
+        <label for="pp-source-pass">This PDF already has a password</label>
+        <div class="pp__row">
+          <input id="pp-source-pass" type="password" autocomplete="off" placeholder="Its current password" />
+          <button id="pp-source-go" class="btn btn--sm" type="button">Unlock to continue</button>
+        </div>
+        <p class="pp__err" id="pp-source-err" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="panel" id="pp-form" hidden>
+      <fieldset class="pp__mode">
+        <legend class="eyebrow">What the password does</legend>
+        <label class="radio">
+          <input type="radio" name="pp-mode" value="open" checked />
+          <span>
+            <strong>Required to open</strong>
+            <small>Nobody can read the file without it.</small>
+          </span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="pp-mode" value="restrict" />
+          <span>
+            <strong>Restrict actions only</strong>
+            <small>Anyone can open it; the password is needed to change permissions.</small>
+          </span>
+        </label>
+      </fieldset>
+
+      <div class="pp__grid">
+        <div class="field">
+          <label for="pp-pass" id="pp-pass-label">Password to open</label>
+          <div class="pp__row">
+            <input id="pp-pass" type="password" autocomplete="new-password" spellcheck="false" />
+            <button id="pp-reveal" class="btn btn--sm" type="button" aria-pressed="false">Show</button>
+          </div>
+          <div class="pp__meter" aria-hidden="true"><span id="pp-meter-fill"></span></div>
+          <p class="pp__strength" id="pp-strength" role="status" aria-live="polite"></p>
+        </div>
+
+        <div class="field">
+          <label for="pp-confirm">Confirm password</label>
+          <input id="pp-confirm" type="password" autocomplete="new-password" spellcheck="false" />
+          <p class="pp__err" id="pp-confirm-err"></p>
+        </div>
+
+        <div class="field">
+          <label for="pp-cipher">Encryption</label>
+          <select id="pp-cipher">
+            {CIPHERS.map((c) => <option value={c.id}>{c.label}</option>)}
+          </select>
+          <small class="pp__hint" id="pp-cipher-hint">{CIPHERS[0].hint}</small>
+        </div>
+
+        <div class="field" id="pp-owner-field">
+          <label for="pp-owner">Owner password <span class="pp__opt">optional</span></label>
+          <input id="pp-owner" type="password" autocomplete="new-password" spellcheck="false" />
+          <small class="pp__hint">Grants full access and is what a reader checks before enforcing the limits below.</small>
+        </div>
+      </div>
+
+      <fieldset class="pp__perms">
+        <legend class="eyebrow">Allow</legend>
+        <div class="pp__checks">
+          <label class="check">
+            <input type="checkbox" id="pp-print-allow" checked /> Printing
+          </label>
+          <label class="check pp__sub">
+            <input type="checkbox" id="pp-print-low" /> Low resolution only
+          </label>
+          {
+            PERMS.map((p) => (
+              <label class="check">
+                <input type="checkbox" id={`pp-${p.id}`} checked /> {p.label}
+              </label>
+            ))
+          }
+        </div>
+        <p class="pp__note" id="pp-perm-note"></p>
+      </fieldset>
+
+      <div class="pp__actions">
+        <button id="pp-run" class="btn btn--solid btn--sm" type="button">
+          <Icon name="lock" size={15} /> Encrypt and download
+        </button>
+        <button id="pp-clear" class="btn btn--sm" type="button">
+          <Icon name="trash" size={15} /> Clear
+        </button>
+      </div>
+
+      <p class="pp__err" id="pp-err" role="status" aria-live="polite"></p>
+    </section>
+
+    <ul class="pp__result" id="pp-result"></ul>
+  </div>
+</ToolLayout>
+
+<style>
+  .pp { display: grid; gap: clamp(14px, 2vw, 20px); }
+
+  .pp__row { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .pp__row input { flex: 1 1 12rem; min-width: 0; }
+  .pp__row .btn { flex: 0 0 auto; }
+
+  .pp__err { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--bad); min-height: 1em; line-height: 1.5; }
+  .pp__hint { color: var(--ink-faint); font-size: 0.73rem; line-height: 1.45; }
+  .pp__opt { color: var(--ink-faint); text-transform: none; letter-spacing: 0; font-size: 0.9em; }
+
+  fieldset { border: 0; margin: 0; padding: 0; }
+  legend { padding: 0; }
+
+  .pp__mode { display: grid; gap: 0.5rem; padding-bottom: 1.3rem; }
+  .radio {
+    display: flex;
+    align-items: flex-start;
+    gap: 0.7rem;
+    padding: 0.7rem 0.8rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--surface);
+    cursor: pointer;
+    transition: border-color 0.18s;
+  }
+  .radio:has(input:checked) { border-color: var(--accent); background: rgba(110, 231, 215, 0.05); }
+  .radio input { margin-top: 0.2rem; accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 auto; }
+  .radio span { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; }
+  .radio strong { font-weight: 400; font-size: 0.92rem; }
+  .radio small { color: var(--ink-faint); font-size: 0.78rem; line-height: 1.5; }
+  .pp__mode + .pp__grid { border-top: 1px solid var(--line); padding-top: 1.3rem; }
+
+  .pp__grid { display: grid; gap: 1.15rem; }
+  @media (min-width: 640px) {
+    .pp__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+  }
+
+  .pp__meter {
+    height: 3px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.09);
+    overflow: hidden;
+    margin-top: 0.15rem;
+  }
+  .pp__meter span {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--bad);
+    transition: width 0.25s, background 0.25s;
+  }
+  .pp__strength { margin: 0.4rem 0 0; font-size: 0.76rem; color: var(--ink-faint); min-height: 1em; line-height: 1.45; }
+
+  .pp__perms { border-top: 1px solid var(--line); margin-top: 1.3rem; padding-top: 1.2rem; }
+  .pp__checks { display: grid; gap: 0.1rem 1.25rem; margin-top: 0.6rem; }
+  @media (min-width: 560px) {
+    .pp__checks { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: 0.87rem;
+    color: var(--ink-dim);
+    min-height: 40px;
+    cursor: pointer;
+  }
+  .check input { width: 17px; height: 17px; accent-color: var(--accent); flex: 0 0 auto; }
+  .pp__sub { padding-left: 1.6rem; font-size: 0.82rem; }
+  .pp__note { margin: 0.9rem 0 0; font-size: 0.79rem; color: var(--warn); line-height: 1.55; max-width: 62ch; }
+
+  .pp__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.3rem; }
+
+  .pp__result { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+</style>
+
+<!-- Runtime-created elements need global rules: Astro appends
+     [data-astro-cid-…] to scoped selectors, and document.createElement() nodes
+     never carry that attribute. Namespaced under this page's own list class. -->
+
+<style is:global>
+  .pp__result .done {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+    background: var(--surface);
+    border: 1px solid color-mix(in srgb, var(--good) 35%, var(--line));
+    border-radius: var(--r-sm);
+    padding: 0.7rem 0.85rem;
+  }
+  .pp__result .done__icon { color: var(--good); flex: 0 0 auto; display: grid; place-items: center; }
+  .pp__result .done__text { display: flex; flex-direction: column; gap: 0.15rem; min-width: 0; flex: 1 1 14rem; }
+  .pp__result .done__name { font-size: 0.9rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pp__result .done__meta { font-size: 0.76rem; color: var(--ink-faint); font-family: var(--mono); }
+  .pp__result .done__again {
+    font: inherit;
+    font-size: 0.78rem;
+    min-height: 36px;
+    padding: 0 0.8rem;
+    border-radius: 999px;
+    border: 1px solid var(--line-strong);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--ink);
+    cursor: pointer;
+    flex: 0 0 auto;
+  }
+  .pp__result .done__again:hover { color: var(--accent); border-color: var(--accent); }
+</style>
+
+<script>
+  import { initDropzone } from '../../lib/ui/dropzone';
+  import { downloadBlob } from '../../lib/ui/download';
+  import { toast } from '../../lib/ui/clipboard';
+  import { formatBytes, stemOf } from '../../lib/ui/files';
+  import {
+    protectPdf, passwordStrength, describePermissions, hasSecureRandom,
+    SourceEncrypted, NoSecureRandom, CIPHERS, loadForProtect,
+    type Cipher, type Permissions,
+  } from '../../lib/pdf/protect';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const sourcePanel = $<HTMLElement>('pp-source');
+  const sourcePass = $<HTMLInputElement>('pp-source-pass');
+  const sourceGo = $<HTMLButtonElement>('pp-source-go');
+  const sourceErr = $<HTMLParagraphElement>('pp-source-err');
+
+  const form = $<HTMLElement>('pp-form');
+  const pass = $<HTMLInputElement>('pp-pass');
+  const passLabel = $<HTMLLabelElement>('pp-pass-label');
+  const confirm = $<HTMLInputElement>('pp-confirm');
+  const confirmErr = $<HTMLParagraphElement>('pp-confirm-err');
+  const reveal = $<HTMLButtonElement>('pp-reveal');
+  const meter = $<HTMLElement>('pp-meter-fill');
+  const strengthEl = $<HTMLParagraphElement>('pp-strength');
+  const cipher = $<HTMLSelectElement>('pp-cipher');
+  const cipherHint = $<HTMLElement>('pp-cipher-hint');
+  const owner = $<HTMLInputElement>('pp-owner');
+  const ownerField = $<HTMLElement>('pp-owner-field');
+  const permNote = $<HTMLParagraphElement>('pp-perm-note');
+  const runBtn = $<HTMLButtonElement>('pp-run');
+  const clearBtn = $<HTMLButtonElement>('pp-clear');
+  const errEl = $<HTMLParagraphElement>('pp-err');
+  const result = $<HTMLUListElement>('pp-result');
+
+  const printAllow = $<HTMLInputElement>('pp-print-allow');
+  const printLow = $<HTMLInputElement>('pp-print-low');
+  const checks = {
+    copying: $<HTMLInputElement>('pp-copying'),
+    modifying: $<HTMLInputElement>('pp-modifying'),
+    annotating: $<HTMLInputElement>('pp-annotating'),
+    fillingForms: $<HTMLInputElement>('pp-fillingForms'),
+  };
+
+  let file: File | null = null;
+  let bytes: Uint8Array | null = null;
+  let sourcePassword: string | undefined;
+  let busy = false;
+
+  const mode = () =>
+    (document.querySelector<HTMLInputElement>('input[name="pp-mode"]:checked')?.value ?? 'open') as
+      | 'open'
+      | 'restrict';
+
+  const permissions = (): Permissions => ({
+    printing: !printAllow.checked ? false : printLow.checked ? 'lowResolution' : 'highResolution',
+    copying: checks.copying.checked,
+    modifying: checks.modifying.checked,
+    annotating: checks.annotating.checked,
+    fillingForms: checks.fillingForms.checked,
+  });
+
+  function syncMode() {
+    const restrict = mode() === 'restrict';
+    // In restrict mode the single password field IS the owner password, so the
+    // separate owner field would be redundant and confusing.
+    passLabel.textContent = restrict ? 'Owner password' : 'Password to open';
+    ownerField.hidden = restrict;
+    permNote.textContent = describePermissions(permissions());
+  }
+
+  function syncStrength() {
+    const s = passwordStrength(pass.value);
+    meter.style.width = `${(s.score / 4) * 100}%`;
+    meter.style.background =
+      s.score >= 4 ? 'var(--good)' : s.score >= 2 ? 'var(--warn)' : 'var(--bad)';
+    strengthEl.textContent = pass.value ? `${s.label} — ${s.hint}` : '';
+  }
+
+  function syncConfirm() {
+    const mismatch = !!confirm.value && confirm.value !== pass.value;
+    confirmErr.textContent = mismatch ? 'The two passwords do not match' : '';
+    return !mismatch;
+  }
+
+  function syncAll() {
+    syncMode();
+    syncStrength();
+    syncConfirm();
+    printLow.disabled = !printAllow.checked;
+  }
+
+  async function open(password?: string) {
+    if (!file) return;
+    errEl.textContent = '';
+    bytes = new Uint8Array(await file.arrayBuffer());
+    sourcePassword = password;
+
+    // Probe once, so an already-encrypted source asks for its password before
+    // the visitor fills in the whole form. Same code path as the encrypt step,
+    // so both classify a bad password identically.
+    try {
+      await loadForProtect(bytes, password);
+      sourcePanel.hidden = true;
+      form.hidden = false;
+      syncAll();
+      pass.focus();
+    } catch (err) {
+      if (err instanceof SourceEncrypted) {
+        sourcePanel.hidden = false;
+        form.hidden = true;
+        // `wrong` distinguishes "you gave one and it failed" from "we need one".
+        sourceErr.textContent = err.wrong ? err.message : '';
+        sourcePass.focus();
+        return;
+      }
+      form.hidden = true;
+      errEl.textContent =
+        err instanceof Error ? `Could not read that PDF: ${err.message}` : 'Could not read that PDF';
+    }
+  }
+
+  async function run() {
+    if (!bytes || !file || busy) return;
+
+    const restrict = mode() === 'restrict';
+    if (!pass.value) {
+      errEl.textContent = restrict ? 'Set an owner password' : 'Set a password to open the file';
+      pass.focus();
+      return;
+    }
+    if (!restrict && !syncConfirm()) {
+      errEl.textContent = 'The two passwords do not match';
+      return;
+    }
+
+    busy = true;
+    runBtn.disabled = true;
+    const label = runBtn.innerHTML;
+    runBtn.textContent = 'Encrypting…';
+    errEl.textContent = '';
+
+    try {
+      const out = await protectPdf({
+        bytes,
+        userPassword: restrict ? undefined : pass.value,
+        ownerPassword: restrict ? pass.value : owner.value || undefined,
+        cipher: cipher.value as Cipher,
+        permissions: permissions(),
+        sourcePassword,
+      });
+
+      const name = `${stemOf(file.name)}-protected.pdf`;
+      // Copy into a plain ArrayBuffer so the Blob does not alias the library heap.
+      const blob = new Blob([out.slice().buffer as ArrayBuffer], { type: 'application/pdf' });
+      downloadBlob(blob, name);
+      showDone(name, blob.size);
+      toast('Encrypted');
+    } catch (err) {
+      if (err instanceof SourceEncrypted) {
+        sourcePanel.hidden = false;
+        form.hidden = true;
+        sourceErr.textContent = err.message;
+      } else if (err instanceof NoSecureRandom) {
+        errEl.textContent = err.message;
+      } else {
+        errEl.textContent =
+          err instanceof Error ? `Could not encrypt: ${err.message}` : 'Could not encrypt';
+      }
+    } finally {
+      busy = false;
+      runBtn.innerHTML = label;
+      runBtn.disabled = false;
+    }
+  }
+
+  function showDone(name: string, size: number) {
+    const li = document.createElement('li');
+    li.className = 'done';
+
+    const icon = document.createElement('span');
+    icon.className = 'done__icon';
+    icon.innerHTML =
+      '<svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="m4.5 12.5 5 5 10-11"/></svg>';
+
+    const text = document.createElement('span');
+    text.className = 'done__text';
+    const nm = document.createElement('span');
+    nm.className = 'done__name';
+    nm.textContent = name;
+    const meta = document.createElement('span');
+    meta.className = 'done__meta';
+    meta.textContent = `${formatBytes(size)} · ${cipher.value} · downloaded`;
+    text.append(nm, meta);
+
+    const again = document.createElement('button');
+    again.type = 'button';
+    again.className = 'done__again';
+    again.dataset.again = '';
+    again.textContent = 'Download again';
+
+    li.append(icon, text, again);
+    result.replaceChildren(li);
+
+    // Keep the bytes so "Download again" costs nothing.
+    lastOutput = { name, size };
+  }
+
+  let lastOutput: { name: string; size: number } | null = null;
+
+  result.addEventListener('click', (e) => {
+    if (!(e.target as HTMLElement).closest('[data-again]')) return;
+    if (lastOutput) void run();
+  });
+
+  initDropzone('pp-file', {
+    accept: ['application/pdf'],
+    onFiles: (files) => {
+      file = files[0];
+      sourcePassword = undefined;
+      sourcePass.value = '';
+      result.replaceChildren();
+      void open();
+    },
+    onReject: () => toast('That is not a PDF'),
+  });
+
+  sourceGo.addEventListener('click', () => void open(sourcePass.value));
+  sourcePass.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void open(sourcePass.value);
+  });
+
+  reveal.addEventListener('click', () => {
+    const shown = pass.type === 'text';
+    pass.type = shown ? 'password' : 'text';
+    confirm.type = pass.type;
+    reveal.setAttribute('aria-pressed', String(!shown));
+    reveal.textContent = shown ? 'Show' : 'Hide';
+  });
+
+  cipher.addEventListener('change', () => {
+    cipherHint.textContent = CIPHERS.find((c) => c.id === cipher.value)?.hint ?? '';
+  });
+
+  form.addEventListener('input', syncAll);
+  form.addEventListener('change', syncAll);
+  runBtn.addEventListener('click', () => void run());
+
+  clearBtn.addEventListener('click', () => {
+    file = null;
+    bytes = null;
+    sourcePassword = undefined;
+    pass.value = confirm.value = owner.value = sourcePass.value = '';
+    form.hidden = true;
+    sourcePanel.hidden = true;
+    errEl.textContent = '';
+    result.replaceChildren();
+  });
+
+  if (!hasSecureRandom()) {
+    errEl.textContent =
+      'Encryption needs a secure context (https). Open this page over https and it will work.';
+  }
+
+  syncAll();
+</script>

@@ -43,8 +43,14 @@ export function loadPdfjs(): Promise<PdfjsModule> {
 
 /** Thrown for an encrypted PDF so the UI can ask for the password. */
 export class PasswordRequired extends Error {
-  constructor(public readonly wrong: boolean) {
+  /** true when a password was supplied and rejected, false when none was given. */
+  readonly wrong: boolean;
+
+  // Field + assignment, not a constructor parameter property: the latter is
+  // TypeScript-only syntax that Node's type stripping refuses.
+  constructor(wrong: boolean) {
     super(wrong ? 'That password did not work' : 'This PDF is password-protected');
+    this.wrong = wrong;
     this.name = 'PasswordRequired';
   }
 }
