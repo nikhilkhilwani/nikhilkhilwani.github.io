@@ -78,7 +78,7 @@ const PERMS = [
         </div>
 
         <div class="field" id="pp-owner-field">
-          <label for="pp-owner">Owner password <span class="pp__opt">optional</span></label>
+          <label for="pp-owner">Owner password <span class="opt">optional</span></label>
           <input id="pp-owner" type="password" autocomplete="new-password" spellcheck="false" />
           <small class="pp__hint">Grants full access and is what a reader checks before enforcing the limits below.</small>
         </div>
@@ -129,7 +129,6 @@ const PERMS = [
 
   .pp__err { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--bad); min-height: 1em; line-height: 1.5; }
   .pp__hint { color: var(--ink-faint); font-size: 0.73rem; line-height: 1.45; }
-  .pp__opt { color: var(--ink-faint); text-transform: none; letter-spacing: 0; font-size: 0.9em; }
 
   fieldset { border: 0; margin: 0; padding: 0; }
   legend { padding: 0; }
@@ -236,6 +235,7 @@ const PERMS = [
   import { downloadBlob } from '../../lib/ui/download';
   import { toast } from '../../lib/ui/clipboard';
   import { formatBytes, stemOf } from '../../lib/ui/files';
+  import { LIMITS } from '../../lib/ui/limits';
   import {
     protectPdf, passwordStrength, describePermissions, hasSecureRandom,
     SourceEncrypted, NoSecureRandom, CIPHERS, openPdfDocument,
@@ -449,6 +449,12 @@ const PERMS = [
 
   initDropzone('pp-file', {
     accept: ['application/pdf'],
+    maxBytes: LIMITS.pdf,
+    onTooLarge: (_r, message) => {
+      errEl.textContent = message;
+      form.hidden = true;
+      sourcePanel.hidden = true;
+    },
     onFiles: (files) => {
       file = files[0];
       sourcePassword = undefined;

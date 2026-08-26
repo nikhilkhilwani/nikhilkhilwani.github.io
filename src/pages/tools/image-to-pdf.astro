@@ -193,6 +193,7 @@ const PAGE_SIZES = [
   import { toast } from '../../lib/ui/clipboard';
   import { decodeImage, sizeOf, releaseImage, drawToCanvas, canvasToBlob } from '../../lib/img/raster';
   import { formatBytes, stemOf } from '../../lib/ui/files';
+  import { LIMITS, screenFiles, describeRejections } from '../../lib/ui/limits';
 
   const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -511,7 +512,22 @@ const PAGE_SIZES = [
   initDropzone('ip-file', {
     accept: ['image/'],
     paste: true,
-    onFiles: (files) => void addFiles(files),
+    maxBytes: LIMITS.image,
+    onTooLarge: (_r, message) => {
+      errEl.textContent = message;
+    },
+    onFiles: (files) => {
+      // Every page's bytes are embedded in one document, so the batch total is
+      // the real ceiling here.
+      const held = pages.reduce((sum, p) => sum + p.file.size, 0);
+      const { accepted, rejected } = screenFiles(files, {
+        perFile: LIMITS.image,
+        total: LIMITS.batch,
+        alreadyHeld: held,
+      });
+      errEl.textContent = rejected.length ? describeRejections(rejected) : '';
+      if (accepted.length) void addFiles(accepted);
+    },
     onReject: (n) => toast(`Skipped ${n} file${n === 1 ? '' : 's'} — not an image`),
   });
 

@@ -7,9 +7,19 @@
  * these.
  */
 
+import { screenFiles, describeRejections, type Rejection } from './limits.ts';
+
 export interface DropzoneOptions {
   /** Called with every accepted file. Never called with an empty list. */
   onFiles: (files: File[]) => void;
+  /**
+   * Largest single file, in bytes. Anything over it is refused before being
+   * read, because the failure mode past the tab's memory ceiling is the tab
+   * dying rather than an error we could catch.
+   */
+  maxBytes?: number;
+  /** Called with what was refused for being too large. */
+  onTooLarge?: (rejected: Rejection[], message: string) => void;
   /** Substring/prefix match against file.type, e.g. ['image/'] or ['application/pdf']. */
   accept?: string[];
   /** Also accept files pasted into the page. */
@@ -44,7 +54,16 @@ export function initDropzone(inputId: string, options: DropzoneOptions): void {
       return;
     }
     if (ok.length < all.length) options.onReject?.(all.length - ok.length);
-    options.onFiles(ok);
+
+    // Size screening happens after type screening so the messages stay
+    // specific: "not an image" and "too large" are different problems.
+    if (options.maxBytes === undefined) {
+      options.onFiles(ok);
+      return;
+    }
+    const { accepted, rejected } = screenFiles(ok, { perFile: options.maxBytes });
+    if (rejected.length) options.onTooLarge?.(rejected, describeRejections(rejected));
+    if (accepted.length) options.onFiles(accepted);
   };
 
   input.addEventListener('change', () => {

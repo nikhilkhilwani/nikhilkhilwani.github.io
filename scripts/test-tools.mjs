@@ -16,6 +16,10 @@ import {
 } from '../src/lib/qr/qr.ts';
 import { fitWithin } from '../src/lib/img/raster.ts';
 import { passwordStrength, describePermissions, OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
+import {
+  LIMITS, screenFiles, formatLimit, describeRejections,
+  canvasPixelsFor, exceedsCanvasBudget, largestSafeScale,
+} from '../src/lib/ui/limits.ts';
 
 let fail = 0;
 let pass = 0;
@@ -258,6 +262,109 @@ eq(
   'Readers that honour permissions will block printing, copying text, editing, commenting and filling forms.',
   'all restrictions listed in order',
 );
+
+/* ---------------------------------------------------------------- limits */
+
+const MB = 1024 * 1024;
+const f = (name, mb) => ({ name, size: Math.round(mb * MB) });
+
+eq(formatLimit(40 * MB), '40 MB', 'formatLimit reads as whole megabytes');
+eq(formatLimit(80 * MB), '80 MB', 'formatLimit 80 MB');
+
+// Per-file ceiling.
+{
+  const r = screenFiles([f('small.jpg', 1), f('huge.jpg', 50)], { perFile: LIMITS.image });
+  eq(r.accepted.length, 1, 'one file accepted under the per-file limit');
+  eq(r.accepted[0].name, 'small.jpg', 'the small one is kept');
+  eq(r.rejected.length, 1, 'the oversized file is refused');
+  eq(r.rejected[0].name, 'huge.jpg', 'refusal names the file');
+  ok(/over the 40 MB limit/.test(r.rejected[0].reason), `reason explains: ${r.rejected[0].reason}`);
+}
+
+// Exactly at the limit is allowed; one byte over is not.
+{
+  const r = screenFiles(
+    [{ name: 'exact', size: LIMITS.image }, { name: 'over', size: LIMITS.image + 1 }],
+    { perFile: LIMITS.image },
+  );
+  eq(r.accepted.length, 1, 'a file exactly at the limit is accepted');
+  eq(r.accepted[0].name, 'exact', 'boundary is inclusive');
+  eq(r.rejected[0].name, 'over', 'one byte over is refused');
+}
+
+// Batch total, including what the tool already holds.
+{
+  const r = screenFiles([f('a', 30), f('b', 30), f('c', 30)], {
+    perFile: LIMITS.image,
+    total: 100 * MB,
+  });
+  eq(r.accepted.length, 3, 'three 30 MB files fit inside 100 MB');
+  eq(r.rejected.length, 0, 'nothing refused');
+}
+{
+  const r = screenFiles([f('a', 30), f('b', 30), f('c', 30), f('d', 30)], {
+    perFile: LIMITS.image,
+    total: 100 * MB,
+  });
+  eq(r.accepted.length, 3, 'the fourth 30 MB file breaks the 100 MB batch');
+  eq(r.rejected.length, 1, 'and is refused');
+  ok(/would put this batch over 100 MB/.test(r.rejected[0].reason), 'batch reason explains itself');
+}
+{
+  const r = screenFiles([f('new', 30)], {
+    perFile: LIMITS.image,
+    total: 100 * MB,
+    alreadyHeld: 80 * MB,
+  });
+  eq(r.accepted.length, 0, 'files already held count towards the batch total');
+  eq(r.rejected.length, 1, 'so the next drop is refused');
+}
+{
+  const r = screenFiles([f('a', 1)], { perFile: LIMITS.image });
+  eq(r.rejected.length, 0, 'no total means only the per-file limit applies');
+}
+deep(screenFiles([], { perFile: LIMITS.image }), { accepted: [], rejected: [] }, 'empty input is empty output');
+
+eq(describeRejections([]), '', 'nothing refused produces no message');
+eq(
+  describeRejections([{ name: 'big.pdf', size: 1, reason: 'over the 80 MB limit for one file' }]),
+  'big.pdf was skipped — over the 80 MB limit for one file.',
+  'a single refusal names the file',
+);
+ok(
+  describeRejections([
+    { name: 'a', size: 1, reason: 'over the 40 MB limit for one file' },
+    { name: 'b', size: 1, reason: 'over the 40 MB limit for one file' },
+  ]).startsWith('2 files were skipped — over the 40 MB limit'),
+  'several refusals sharing a reason are summarised with it',
+);
+ok(
+  describeRejections([
+    { name: 'a', size: 1, reason: 'over the 40 MB limit for one file' },
+    { name: 'b', size: 1, reason: 'would put this batch over 200 MB' },
+  ]) === '2 files were skipped.',
+  'mixed reasons are summarised without a misleading single cause',
+);
+
+// Canvas budget. A4 at 72 dpi is 595x842 pt.
+eq(canvasPixelsFor(595, 842, 1), 595 * 842, 'canvas pixels at scale 1');
+eq(canvasPixelsFor(595, 842, 2), 1190 * 1684, 'canvas pixels at scale 2');
+ok(!exceedsCanvasBudget(canvasPixelsFor(595, 842, 4)), 'A4 at 288 dpi is within budget');
+// A0 is 2384x3370 pt — the case that used to kill the tab.
+ok(exceedsCanvasBudget(canvasPixelsFor(2384, 3370, 4)), 'A0 at 288 dpi exceeds the budget');
+ok(!exceedsCanvasBudget(canvasPixelsFor(2384, 3370, 2)), 'A0 at 144 dpi is fine');
+
+ok(largestSafeScale(2384, 3370) >= 2, 'a safe scale for A0 is at least 2');
+ok(
+  !exceedsCanvasBudget(canvasPixelsFor(2384, 3370, largestSafeScale(2384, 3370))),
+  'the suggested scale actually fits the budget',
+);
+ok(
+  exceedsCanvasBudget(canvasPixelsFor(2384, 3370, largestSafeScale(2384, 3370) + 0.2)),
+  'and is close to the largest that does',
+);
+eq(largestSafeScale(0, 0), 1, 'a degenerate page size does not divide by zero');
+ok(largestSafeScale(100000, 100000) >= 0.1, 'an absurd page still yields a positive scale');
 
 /* -------------------------------------------------------------------- end */
 

@@ -123,6 +123,7 @@ import { UNLOCK_CAVEATS } from '../../lib/pdf/unlock';
   import { downloadBlob } from '../../lib/ui/download';
   import { toast } from '../../lib/ui/clipboard';
   import { formatBytes, stemOf } from '../../lib/ui/files';
+  import { LIMITS } from '../../lib/ui/limits';
   import { unlockPdf, inspectEncryption, SourceEncrypted, type Encryption } from '../../lib/pdf/unlock';
 
   const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
@@ -258,6 +259,11 @@ import { UNLOCK_CAVEATS } from '../../lib/pdf/unlock';
 
   initDropzone('up-file', {
     accept: ['application/pdf'],
+    maxBytes: LIMITS.pdf,
+    onTooLarge: (_r, message) => {
+      errEl.textContent = message;
+      statePanel.hidden = true;
+    },
     onFiles: (files) => {
       file = files[0];
       pass.value = '';

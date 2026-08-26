@@ -188,6 +188,7 @@ const SIZE_CAPS = [
     ENCODE_TYPES, formatBytes, savingsPercent, uniqueName, withExtension,
     isEncodeType, type EncodeType,
   } from '../../lib/ui/files';
+  import { LIMITS, screenFiles, describeRejections } from '../../lib/ui/limits';
 
   const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -383,8 +384,24 @@ const SIZE_CAPS = [
   initDropzone('ic-file', {
     accept: ['image/'],
     paste: true,
+    maxBytes: LIMITS.image,
+    onTooLarge: (_r, message) => {
+      note.textContent = message;
+    },
     onFiles: (files) => {
-      for (const file of files) items.push({ id: nextId++, file, status: 'pending' });
+      // Every converted blob and thumbnail is held at once, so the batch total
+      // matters as much as any single file.
+      const held = items.reduce((sum, i) => sum + i.file.size, 0);
+      const { accepted, rejected } = screenFiles(files, {
+        perFile: LIMITS.image,
+        total: LIMITS.batch,
+        alreadyHeld: held,
+      });
+      if (rejected.length) note.textContent = describeRejections(rejected);
+      else if (accepted.length) note.textContent = '';
+      if (!accepted.length) return;
+
+      for (const file of accepted) items.push({ id: nextId++, file, status: 'pending' });
       scheduleConvert();
     },
     onReject: (n) => toast(`Skipped ${n} file${n === 1 ? '' : 's'} — not an image`),

@@ -28,6 +28,10 @@ jobs:
           cache: npm
       - run: npm ci
       - run: npm run check
+      # Covers the pure logic, and — via scripts/test-pdf.mjs — verifies the
+      # encryption tools against pdf.js, an independent implementation. That
+      # also tripwires the third-party error strings classifyPasswordError
+      # depends on, which no other check would notice drifting.
       - run: npm test
       - run: npm run build
       # Verifies the built pages against their scripts — catches an id typo

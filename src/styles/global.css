@@ -185,6 +185,15 @@ input[type="range"] {
 
 .mono { font-family: var(--mono); font-size: 0.86rem; letter-spacing: 0; }
 
+/* Marks a field the tool works fine without. Resets the label's uppercase
+   treatment so it reads as an aside rather than part of the field name. */
+.opt {
+  color: var(--ink-faint);
+  text-transform: none;
+  letter-spacing: 0;
+  font-size: 0.9em;
+}
+
 /* Copy-to-clipboard rows share this shape across every tool. */
 .copyrow {
   display: flex;

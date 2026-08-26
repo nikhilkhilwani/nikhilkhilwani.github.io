@@ -201,6 +201,7 @@ const SCALES = [
   import { canvasToBlob } from '../../lib/img/raster';
   import { openPdf, PasswordRequired } from '../../lib/pdf/pdfjs';
   import { formatBytes, pageLabel, parsePageRange, stemOf } from '../../lib/ui/files';
+  import { LIMITS, canvasPixelsFor, exceedsCanvasBudget, largestSafeScale } from '../../lib/ui/limits';
 
   const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -352,6 +353,7 @@ const SCALES = [
     const scale = Number(scaleSel.value) || 2;
     const stem = stemOf(file.name) || 'page';
 
+    const skipped: { page: number; safeScale: number }[] = [];
     let doc: Awaited<ReturnType<typeof openPdf>>['doc'] | null = null;
     try {
       const opened = await openPdf(new Uint8Array(await file.arrayBuffer()), passInput.value || undefined);
@@ -362,6 +364,21 @@ const SCALES = [
 
         const page = await doc.getPage(pageNo);
         const viewport = page.getViewport({ scale });
+
+        // A very large page at a high resolution is the one input that kills
+        // the tab outright: an A0 sheet at 288 dpi is ~32 MP, about 130 MB of
+        // RGBA. Skip it with an explanation rather than taking the tab down.
+        const pixels = canvasPixelsFor(viewport.width, viewport.height, 1);
+        if (exceedsCanvasBudget(pixels)) {
+          const unscaled = page.getViewport({ scale: 1 });
+          skipped.push({
+            page: pageNo,
+            safeScale: largestSafeScale(unscaled.width, unscaled.height),
+          });
+          page.cleanup();
+          setProgress(index + 1, pages.length);
+          continue;
+        }
 
         const canvas = document.createElement('canvas');
         // Round up: a fractional canvas size silently crops the right/bottom edge.
@@ -394,6 +411,14 @@ const SCALES = [
         await new Promise((resolve) => window.setTimeout(resolve, 0));
       }
 
+      if (skipped.length) {
+        const safest = Math.min(...skipped.map((s) => s.safeScale));
+        const list = skipped.map((s) => s.page).join(", ");
+        errEl.textContent =
+          `Page${skipped.length === 1 ? "" : "s"} ${list} ${skipped.length === 1 ? "is" : "are"} too large ` +
+          `to render at this resolution. Try a scale of ${safest} or lower.`;
+      }
+
       if (cancelled) toast(`Stopped after ${rendered.length} page${rendered.length === 1 ? '' : 's'}`);
       else if (rendered.length) toast(`Rendered ${rendered.length} page${rendered.length === 1 ? '' : 's'}`);
     } catch (err) {
@@ -412,6 +437,11 @@ const SCALES = [
     // Some systems hand over an empty type for .pdf, so the extension is the
     // fallback inside initDropzone.
     accept: ['application/pdf'],
+    maxBytes: LIMITS.pdf,
+    onTooLarge: (_r, message) => {
+      errEl.textContent = message;
+      controls.hidden = true;
+    },
     onFiles: (files) => {
       file = files[0];
       pageCount = 0;
