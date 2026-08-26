@@ -57,7 +57,7 @@ export const tools: ToolMeta[] = [
     title: 'QR Code Generator',
     description: 'Generate QR codes for links, text, WiFi, and contact cards, and export as SVG or PNG.',
     icon: 'qr',
-    status: 'coming-soon',
+    status: 'available',
     category: 'image',
   },
   {
@@ -65,7 +65,7 @@ export const tools: ToolMeta[] = [
     title: 'Image Converter',
     description: 'Convert images between PNG, JPEG, and WebP with a quality dial. Nothing is uploaded.',
     icon: 'image',
-    status: 'coming-soon',
+    status: 'available',
     category: 'image',
   },
   {
@@ -73,7 +73,7 @@ export const tools: ToolMeta[] = [
     title: 'Image to PDF',
     description: 'Combine and reorder images into a single PDF, entirely in your browser.',
     icon: 'file-out',
-    status: 'coming-soon',
+    status: 'available',
     category: 'pdf',
   },
   {
@@ -81,7 +81,7 @@ export const tools: ToolMeta[] = [
     title: 'PDF to JPG',
     description: 'Render every page of a PDF to a JPG and download the set as a ZIP.',
     icon: 'file-image',
-    status: 'coming-soon',
+    status: 'available',
     category: 'pdf',
   },
   {

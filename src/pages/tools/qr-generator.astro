@@ -1,0 +1,461 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Icon from '../../components/Icon.astro';
+import { EC_LEVELS } from '../../lib/qr/qr';
+
+const MODES = [
+  { id: 'text', label: 'Link or text' },
+  { id: 'wifi', label: 'WiFi' },
+  { id: 'contact', label: 'Contact' },
+  { id: 'email', label: 'Email' },
+];
+---
+
+<ToolLayout slug="qr-generator">
+  <div class="qr">
+    <section class="panel qr__form">
+      <div class="tabs" role="tablist" aria-label="QR code type">
+        {
+          MODES.map((m, i) => (
+            <button
+              class="tabs__tab"
+              type="button"
+              role="tab"
+              id={`qr-tab-${m.id}`}
+              data-mode={m.id}
+              aria-controls={`qr-panel-${m.id}`}
+              aria-selected={i === 0 ? 'true' : 'false'}
+              tabindex={i === 0 ? 0 : -1}
+            >
+              {m.label}
+            </button>
+          ))
+        }
+      </div>
+
+      <div id="qr-panel-text" role="tabpanel" aria-labelledby="qr-tab-text" class="qr__panel">
+        <div class="field">
+          <label for="qr-text">URL or text</label>
+          <textarea id="qr-text" rows="3" spellcheck="false">https://nikhilkhilwani.github.io</textarea>
+        </div>
+      </div>
+
+      <div id="qr-panel-wifi" role="tabpanel" aria-labelledby="qr-tab-wifi" class="qr__panel" hidden>
+        <div class="qr__two">
+          <div class="field">
+            <label for="qr-wifi-ssid">Network name (SSID)</label>
+            <input id="qr-wifi-ssid" type="text" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="qr-wifi-auth">Security</label>
+            <select id="qr-wifi-auth">
+              <option value="WPA" selected>WPA / WPA2 / WPA3</option>
+              <option value="WEP">WEP</option>
+              <option value="nopass">Open — no password</option>
+            </select>
+          </div>
+        </div>
+        <div class="field">
+          <label for="qr-wifi-pass">Password</label>
+          <input id="qr-wifi-pass" type="text" autocomplete="off" spellcheck="false" />
+        </div>
+        <label class="check">
+          <input id="qr-wifi-hidden" type="checkbox" /> Hidden network
+        </label>
+      </div>
+
+      <div id="qr-panel-contact" role="tabpanel" aria-labelledby="qr-tab-contact" class="qr__panel" hidden>
+        <div class="qr__two">
+          <div class="field">
+            <label for="qr-c-name">Full name</label>
+            <input id="qr-c-name" type="text" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="qr-c-org">Organisation</label>
+            <input id="qr-c-org" type="text" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="qr-c-title">Job title</label>
+            <input id="qr-c-title" type="text" autocomplete="off" />
+          </div>
+          <div class="field">
+            <label for="qr-c-phone">Phone</label>
+            <input id="qr-c-phone" type="text" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="qr-c-email">Email</label>
+            <input id="qr-c-email" type="text" autocomplete="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="qr-c-url">Website</label>
+            <input id="qr-c-url" type="text" autocomplete="off" spellcheck="false" />
+          </div>
+        </div>
+      </div>
+
+      <div id="qr-panel-email" role="tabpanel" aria-labelledby="qr-tab-email" class="qr__panel" hidden>
+        <div class="field">
+          <label for="qr-e-to">Send to</label>
+          <input id="qr-e-to" type="text" autocomplete="off" spellcheck="false" />
+        </div>
+        <div class="field">
+          <label for="qr-e-subject">Subject</label>
+          <input id="qr-e-subject" type="text" autocomplete="off" />
+        </div>
+        <div class="field">
+          <label for="qr-e-body">Message</label>
+          <textarea id="qr-e-body" rows="2"></textarea>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel qr__preview" aria-label="Preview">
+      <div class="qr__stage" id="qr-stage"></div>
+      <p class="qr__meta mono" id="qr-meta">—</p>
+      <p class="qr__err" id="qr-err" role="status" aria-live="polite"></p>
+      <div class="qr__save">
+        <button id="qr-svg" class="btn btn--solid btn--sm" type="button">
+          <Icon name="download" size={15} /> SVG
+        </button>
+        <button id="qr-png" class="btn btn--sm" type="button">
+          <Icon name="download" size={15} /> PNG
+        </button>
+        <button id="qr-copy" class="btn btn--sm" type="button" data-copy="" data-copy-label="Payload">
+          <Icon name="copy" size={15} /> Payload
+        </button>
+      </div>
+    </section>
+
+    <section class="panel qr__opts">
+      <p class="eyebrow">Appearance</p>
+      <div class="qr__optgrid">
+        <div class="field">
+          <label for="qr-ec">Error correction</label>
+          <select id="qr-ec">
+            {
+              EC_LEVELS.map((l) => (
+                <option value={l.id} selected={l.id === 'M'}>
+                  {l.label}
+                </option>
+              ))
+            }
+          </select>
+          <small class="qr__hint" id="qr-ec-hint">Balanced. The usual choice.</small>
+        </div>
+
+        <div class="field">
+          <label for="qr-scale">Module size <output id="qr-scale-out">8 px</output></label>
+          <input id="qr-scale" type="range" min="2" max="20" step="1" value="8" />
+        </div>
+
+        <div class="field">
+          <label for="qr-margin">Quiet zone <output id="qr-margin-out">4</output></label>
+          <input id="qr-margin" type="range" min="1" max="8" step="1" value="4" />
+        </div>
+
+        <div class="field">
+          <label for="qr-radius">Dot rounding <output id="qr-radius-out">0%</output></label>
+          <input id="qr-radius" type="range" min="0" max="50" step="5" value="0" />
+        </div>
+
+        <div class="field">
+          <label for="qr-dark">Foreground</label>
+          <input id="qr-dark" type="color" value="#07080c" />
+        </div>
+
+        <div class="field">
+          <label for="qr-light">Background</label>
+          <input id="qr-light" type="color" value="#ffffff" />
+        </div>
+      </div>
+      <p class="qr__warn" id="qr-warn" hidden>
+        Light foreground on a dark background — many scanners expect the
+        opposite and will refuse to read this.
+      </p>
+    </section>
+  </div>
+</ToolLayout>
+
+<style>
+  .qr { display: grid; gap: clamp(14px, 2vw, 20px); }
+  @media (min-width: 860px) {
+    .qr { grid-template-columns: minmax(0, 1fr) 260px; }
+    .qr__opts { grid-column: 1 / -1; }
+  }
+
+  .tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    margin-bottom: 1.1rem;
+  }
+  .tabs__tab {
+    font: inherit;
+    font-size: 0.83rem;
+    min-height: 38px;
+    padding: 0 0.85rem;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: color 0.18s, border-color 0.18s, background 0.18s;
+  }
+  .tabs__tab:hover { color: var(--ink); }
+  .tabs__tab[aria-selected='true'] {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: rgba(110, 231, 215, 0.07);
+  }
+
+  .qr__panel { display: grid; gap: 0.85rem; }
+  .qr__two { display: grid; gap: 0.85rem; }
+  @media (min-width: 560px) {
+    .qr__two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  textarea { resize: vertical; min-height: 68px; font-family: var(--mono); font-size: 0.88rem; }
+
+  .check {
+    display: flex;
+    align-items: center;
+    gap: 0.55rem;
+    font-size: 0.85rem;
+    color: var(--ink-dim);
+    min-height: 44px;
+  }
+  .check input { width: 18px; height: 18px; accent-color: var(--accent); }
+
+  .qr__preview { display: flex; flex-direction: column; gap: 0.7rem; align-items: stretch; }
+  .qr__stage {
+    display: grid;
+    place-items: center;
+    padding: 0.75rem;
+    border-radius: var(--r-sm);
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    min-height: 190px;
+  }
+  .qr__stage :global(svg) {
+    width: 100%;
+    height: auto;
+    max-width: 210px;
+    border-radius: 4px;
+    display: block;
+  }
+  .qr__meta { margin: 0; color: var(--ink-faint); font-size: 0.74rem; text-align: center; }
+  .qr__err { margin: 0; font-size: 0.78rem; color: var(--bad); line-height: 1.5; min-height: 1em; }
+  .qr__save { display: flex; flex-wrap: wrap; gap: 0.4rem; }
+  .qr__save .btn { flex: 1 1 auto; }
+
+  .qr__optgrid { display: grid; gap: 1rem; margin-top: 0.85rem; }
+  @media (min-width: 560px) {
+    .qr__optgrid { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  }
+  .qr__optgrid .field > label { display: flex; justify-content: space-between; gap: 0.5rem; }
+  .qr__optgrid output { font-family: var(--mono); color: var(--ink-dim); }
+  .qr__hint { color: var(--ink-faint); font-size: 0.73rem; line-height: 1.45; }
+  .qr__warn {
+    margin: 0.9rem 0 0;
+    font-size: 0.78rem;
+    color: var(--warn);
+    line-height: 1.5;
+  }
+</style>
+
+<script>
+  import {
+    buildMatrix, matrixToSvg, matrixToCanvas, wifiPayload, vcardPayload,
+    emailPayload, normalizeUrlish, EC_LEVELS, type EcLevel, type WifiAuth,
+  } from '../../lib/qr/qr';
+  import { downloadBlob, downloadText } from '../../lib/ui/download';
+  import { bindCopy, toast } from '../../lib/ui/clipboard';
+  import { canvasToBlob } from '../../lib/img/raster';
+  import { contrastRatio } from '../../lib/contrast/wcag';
+  import { parseColor } from '../../lib/color/convert';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const stage = $<HTMLDivElement>('qr-stage');
+  const metaEl = $<HTMLParagraphElement>('qr-meta');
+  const errEl = $<HTMLParagraphElement>('qr-err');
+  const warnEl = $<HTMLParagraphElement>('qr-warn');
+  const ecHint = $<HTMLElement>('qr-ec-hint');
+
+  const ec = $<HTMLSelectElement>('qr-ec');
+  const scale = $<HTMLInputElement>('qr-scale');
+  const margin = $<HTMLInputElement>('qr-margin');
+  const radius = $<HTMLInputElement>('qr-radius');
+  const dark = $<HTMLInputElement>('qr-dark');
+  const light = $<HTMLInputElement>('qr-light');
+  const outs = {
+    scale: $<HTMLOutputElement>('qr-scale-out'),
+    margin: $<HTMLOutputElement>('qr-margin-out'),
+    radius: $<HTMLOutputElement>('qr-radius-out'),
+  };
+
+  const copyBtn = $<HTMLButtonElement>('qr-copy');
+  const tabs = [...document.querySelectorAll<HTMLButtonElement>('.tabs__tab')];
+
+  let mode = 'text';
+  // Last good payload, kept so the export buttons never write a stale code.
+  let payload = '';
+
+  function readPayload(): string {
+    switch (mode) {
+      case 'wifi':
+        return wifiPayload({
+          ssid: $<HTMLInputElement>('qr-wifi-ssid').value,
+          password: $<HTMLInputElement>('qr-wifi-pass').value,
+          auth: $<HTMLSelectElement>('qr-wifi-auth').value as WifiAuth,
+          hidden: $<HTMLInputElement>('qr-wifi-hidden').checked,
+        });
+      case 'contact':
+        return vcardPayload({
+          name: $<HTMLInputElement>('qr-c-name').value,
+          org: $<HTMLInputElement>('qr-c-org').value,
+          title: $<HTMLInputElement>('qr-c-title').value,
+          phone: $<HTMLInputElement>('qr-c-phone').value,
+          email: $<HTMLInputElement>('qr-c-email').value,
+          url: $<HTMLInputElement>('qr-c-url').value,
+        });
+      case 'email':
+        return emailPayload({
+          to: $<HTMLInputElement>('qr-e-to').value,
+          subject: $<HTMLInputElement>('qr-e-subject').value,
+          body: $<HTMLTextAreaElement>('qr-e-body').value,
+        });
+      default:
+        return normalizeUrlish($<HTMLTextAreaElement>('qr-text').value);
+    }
+  }
+
+  const emptyHint: Record<string, string> = {
+    text: 'Type a link or some text to see a code.',
+    wifi: 'Enter the network name to see a code.',
+    contact: 'Enter a name to see a code.',
+    email: 'Enter an address to see a code.',
+  };
+
+  function render() {
+    outs.scale.textContent = `${scale.value} px`;
+    outs.margin.textContent = margin.value;
+    outs.radius.textContent = `${radius.value}%`;
+    ecHint.textContent = EC_LEVELS.find((l) => l.id === ec.value)?.hint ?? '';
+
+    // Contrast, not lightness, is what a scanner actually needs.
+    const fg = parseColor(dark.value);
+    const bg = parseColor(light.value);
+    if (fg && bg) {
+      const ratio = contrastRatio(fg, bg);
+      const inverted = fg.r + fg.g + fg.b > bg.r + bg.g + bg.b;
+      warnEl.hidden = !(inverted || ratio < 3);
+      warnEl.textContent = inverted
+        ? 'Light foreground on a dark background — many scanners expect the opposite and will refuse to read this.'
+        : 'Not enough contrast between the two colors for a reliable scan.';
+    }
+
+    payload = readPayload();
+    if (!payload) {
+      stage.replaceChildren();
+      metaEl.textContent = '—';
+      errEl.textContent = emptyHint[mode] ?? '';
+      copyBtn.dataset.copy = '';
+      return;
+    }
+
+    try {
+      const matrix = buildMatrix(payload, ec.value as EcLevel);
+      const svg = matrixToSvg(matrix, {
+        scale: Number(scale.value),
+        margin: Number(margin.value),
+        dark: dark.value,
+        light: light.value,
+        radius: Number(radius.value) / 100,
+      });
+      // Our own generated markup, with the two colors attribute-escaped.
+      stage.innerHTML = svg;
+      const side = (matrix.size + Number(margin.value) * 2) * Number(scale.value);
+      metaEl.textContent = `v${matrix.version} · ${matrix.size}×${matrix.size} modules · ${side}×${side} px · ${payload.length} chars`;
+      errEl.textContent = '';
+      copyBtn.dataset.copy = payload;
+    } catch (err) {
+      stage.replaceChildren();
+      metaEl.textContent = '—';
+      errEl.textContent =
+        err instanceof Error ? err.message : 'Could not build a QR code from that';
+      copyBtn.dataset.copy = '';
+    }
+  }
+
+  function selectMode(next: string) {
+    mode = next;
+    for (const tab of tabs) {
+      const on = tab.dataset.mode === next;
+      tab.setAttribute('aria-selected', on ? 'true' : 'false');
+      tab.tabIndex = on ? 0 : -1;
+      const panel = document.getElementById(`qr-panel-${tab.dataset.mode}`);
+      if (panel) panel.hidden = !on;
+    }
+    render();
+  }
+
+  for (const [i, tab] of tabs.entries()) {
+    tab.addEventListener('click', () => selectMode(tab.dataset.mode ?? 'text'));
+    // Roving tabindex: arrow keys move between tabs, per the ARIA pattern.
+    tab.addEventListener('keydown', (e) => {
+      const step = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!step) return;
+      e.preventDefault();
+      const next = tabs[(i + step + tabs.length) % tabs.length];
+      next.focus();
+      selectMode(next.dataset.mode ?? 'text');
+    });
+  }
+
+  // One listener for the whole form — every field just triggers a re-render.
+  for (const event of ['input', 'change']) {
+    document.querySelector('.qr__form')?.addEventListener(event, render);
+    document.querySelector('.qr__opts')?.addEventListener(event, render);
+  }
+
+  $<HTMLButtonElement>('qr-svg').addEventListener('click', () => {
+    if (!payload) return;
+    try {
+      const matrix = buildMatrix(payload, ec.value as EcLevel);
+      downloadText(
+        matrixToSvg(matrix, {
+          scale: Number(scale.value),
+          margin: Number(margin.value),
+          dark: dark.value,
+          light: light.value,
+          radius: Number(radius.value) / 100,
+        }),
+        'qr-code.svg',
+        'image/svg+xml',
+      );
+    } catch {
+      toast('Nothing to export yet');
+    }
+  });
+
+  $<HTMLButtonElement>('qr-png').addEventListener('click', async () => {
+    if (!payload) return;
+    try {
+      const matrix = buildMatrix(payload, ec.value as EcLevel);
+      // PNG export bumps the module size so the file is useful for print even
+      // when the on-screen preview is small.
+      const canvas = matrixToCanvas(matrix, {
+        scale: Math.max(8, Number(scale.value)),
+        margin: Number(margin.value),
+        dark: dark.value,
+        light: light.value,
+      });
+      downloadBlob(await canvasToBlob(canvas, 'image/png'), 'qr-code.png');
+    } catch {
+      toast('Could not export a PNG');
+    }
+  });
+
+  bindCopy();
+  selectMode('text');
+</script>

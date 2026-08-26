@@ -1,0 +1,451 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+
+const SIZE_CAPS = [
+  { value: '0', label: 'Keep original size' },
+  { value: '3840', label: '4K — 3840 px' },
+  { value: '2560', label: '2560 px' },
+  { value: '1920', label: 'Full HD — 1920 px' },
+  { value: '1280', label: '1280 px' },
+  { value: '800', label: '800 px' },
+  { value: '400', label: 'Thumbnail — 400 px' },
+];
+---
+
+<ToolLayout slug="image-converter">
+  <div class="ic">
+    <Dropzone
+      id="ic-file"
+      accept="image/*"
+      multiple
+      icon="image"
+      label="Choose images, or drop them anywhere"
+      hint="PNG, JPEG, WebP, GIF, BMP, SVG, AVIF — whatever your browser can decode. You can paste too."
+    />
+
+    <section class="panel ic__controls">
+      <div class="ic__grid">
+        <div class="field">
+          <label for="ic-format">Convert to</label>
+          <select id="ic-format">
+            <option value="image/png">PNG</option>
+            <option value="image/jpeg" selected>JPEG</option>
+            <option value="image/webp">WebP</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="ic-max">Resize</label>
+          <select id="ic-max">
+            {SIZE_CAPS.map((c) => <option value={c.value}>{c.label}</option>)}
+          </select>
+        </div>
+
+        <div class="field" id="ic-quality-field">
+          <label for="ic-quality">
+            Quality <output id="ic-quality-out">82</output>
+          </label>
+          <input id="ic-quality" type="range" min="30" max="100" step="1" value="82" />
+        </div>
+      </div>
+
+      <p class="ic__note" id="ic-note" role="status" aria-live="polite"></p>
+    </section>
+
+    <section class="ic__bar" hidden id="ic-bar">
+      <div class="ic__stats">
+        <strong id="ic-count">0 images</strong>
+        <span id="ic-total">—</span>
+      </div>
+      <div class="ic__actions">
+        <button id="ic-zip" class="btn btn--solid btn--sm" type="button">
+          <Icon name="download" size={15} /> Download all (ZIP)
+        </button>
+        <button id="ic-clear" class="btn btn--sm" type="button">
+          <Icon name="trash" size={15} /> Clear
+        </button>
+      </div>
+    </section>
+
+    <ul class="ic__list" id="ic-list"></ul>
+  </div>
+</ToolLayout>
+
+<style>
+  .ic { display: grid; gap: clamp(14px, 2vw, 20px); }
+
+  .ic__grid { display: grid; gap: 1rem; }
+  @media (min-width: 640px) {
+    .ic__grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+  }
+  .ic__grid output { font-family: var(--mono); color: var(--ink-dim); }
+  .ic__grid .field > label { display: flex; justify-content: space-between; gap: 0.5rem; }
+
+  .ic__note {
+    margin: 0.9rem 0 0;
+    min-height: 1.1em;
+    font-size: 0.8rem;
+    color: var(--warn);
+    line-height: 1.5;
+  }
+
+  .ic__bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .ic__stats { display: flex; flex-direction: column; gap: 0.15rem; }
+  .ic__stats strong { font-weight: 400; font-size: 0.95rem; }
+  .ic__stats span { font-size: 0.8rem; color: var(--ink-faint); font-family: var(--mono); }
+  .ic__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+  .ic__list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; }
+
+  .row {
+    display: grid;
+    grid-template-columns: 44px minmax(0, 1fr) auto;
+    gap: 0.85rem;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 0.55rem 0.6rem;
+  }
+  .row[data-state='error'] { border-color: color-mix(in srgb, var(--bad) 45%, var(--line)); }
+
+  .row__thumb {
+    width: 44px;
+    height: 44px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: var(--surface-2) center / cover no-repeat;
+    display: grid;
+    place-items: center;
+    color: var(--ink-faint);
+    overflow: hidden;
+  }
+  .row__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .row__meta { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+  .row__name {
+    font-size: 0.9rem;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .row__sub {
+    font-size: 0.76rem;
+    color: var(--ink-faint);
+    font-family: var(--mono);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.15rem 0.5rem;
+  }
+  .row__win { color: var(--good); }
+  .row__lose { color: var(--warn); }
+  .row__err { color: var(--bad); font-family: var(--sans); }
+
+  .row__btns { display: flex; gap: 0.3rem; }
+  .iconbtn {
+    font: inherit;
+    display: grid;
+    place-items: center;
+    width: 38px;
+    height: 38px;
+    border-radius: 9px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: color 0.18s, border-color 0.18s;
+  }
+  .iconbtn:hover { color: var(--accent); border-color: var(--accent); }
+  .iconbtn[disabled] { opacity: 0.4; cursor: default; }
+  .iconbtn[disabled]:hover { color: var(--ink-dim); border-color: var(--line); }
+</style>
+
+<script>
+  import { convertImage, canEncode } from '../../lib/img/raster';
+  import { downloadBlob, zipFiles, blobBytes } from '../../lib/ui/download';
+  import { initDropzone } from '../../lib/ui/dropzone';
+  import { toast } from '../../lib/ui/clipboard';
+  import {
+    ENCODE_TYPES, formatBytes, savingsPercent, uniqueName, withExtension,
+    isEncodeType, type EncodeType,
+  } from '../../lib/ui/files';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const format = $<HTMLSelectElement>('ic-format');
+  const maxEdge = $<HTMLSelectElement>('ic-max');
+  const quality = $<HTMLInputElement>('ic-quality');
+  const qualityOut = $<HTMLOutputElement>('ic-quality-out');
+  const qualityField = $<HTMLDivElement>('ic-quality-field');
+  const note = $<HTMLParagraphElement>('ic-note');
+  const bar = $<HTMLElement>('ic-bar');
+  const list = $<HTMLUListElement>('ic-list');
+  const countEl = $<HTMLElement>('ic-count');
+  const totalEl = $<HTMLElement>('ic-total');
+  const zipBtn = $<HTMLButtonElement>('ic-zip');
+  const clearBtn = $<HTMLButtonElement>('ic-clear');
+
+  interface Item {
+    id: number;
+    file: File;
+    status: 'pending' | 'done' | 'error';
+    blob?: Blob;
+    outName?: string;
+    from?: { width: number; height: number };
+    to?: { width: number; height: number };
+    thumb?: string;
+    error?: string;
+  }
+
+  let items: Item[] = [];
+  let nextId = 1;
+  // Bumped on every settings change so a slow in-flight pass can detect that
+  // its results are stale and drop them instead of overwriting fresh ones.
+  let runToken = 0;
+
+  const currentType = (): EncodeType =>
+    isEncodeType(format.value) ? format.value : 'image/jpeg';
+
+  function releaseThumb(item: Item) {
+    if (item.thumb) {
+      URL.revokeObjectURL(item.thumb);
+      item.thumb = undefined;
+    }
+  }
+
+  function syncQualityVisibility() {
+    const lossy = ENCODE_TYPES[currentType()].lossy;
+    qualityField.hidden = !lossy;
+    qualityOut.textContent = quality.value;
+  }
+
+  function render() {
+    bar.hidden = items.length === 0;
+
+    const done = items.filter((i) => i.status === 'done');
+    const before = done.reduce((sum, i) => sum + i.file.size, 0);
+    const after = done.reduce((sum, i) => sum + (i.blob?.size ?? 0), 0);
+
+    countEl.textContent = `${items.length} image${items.length === 1 ? '' : 's'}`;
+    totalEl.textContent = done.length
+      ? `${formatBytes(before)} → ${formatBytes(after)} (${savingsPercent(before, after)}% saved)`
+      : 'Converting…';
+    zipBtn.disabled = done.length === 0;
+
+    list.replaceChildren(
+      ...items.map((item) => {
+        const li = document.createElement('li');
+        li.className = 'row';
+        li.dataset.state = item.status;
+
+        const thumb = document.createElement('div');
+        thumb.className = 'row__thumb';
+        if (item.thumb) {
+          const img = document.createElement('img');
+          img.src = item.thumb;
+          img.alt = '';
+          thumb.appendChild(img);
+        }
+
+        const meta = document.createElement('div');
+        meta.className = 'row__meta';
+        const name = document.createElement('span');
+        name.className = 'row__name';
+        name.textContent = item.outName ?? item.file.name;
+        const sub = document.createElement('span');
+        sub.className = 'row__sub';
+
+        if (item.status === 'error') {
+          sub.innerHTML = '';
+          const err = document.createElement('span');
+          err.className = 'row__err';
+          err.textContent = item.error ?? 'Could not convert';
+          sub.appendChild(err);
+        } else if (item.status === 'done' && item.blob && item.from && item.to) {
+          const pct = savingsPercent(item.file.size, item.blob.size);
+          const dims =
+            item.from.width === item.to.width && item.from.height === item.to.height
+              ? `${item.to.width}×${item.to.height}`
+              : `${item.from.width}×${item.from.height} → ${item.to.width}×${item.to.height}`;
+          for (const text of [dims, `${formatBytes(item.file.size)} → ${formatBytes(item.blob.size)}`]) {
+            const span = document.createElement('span');
+            span.textContent = text;
+            sub.appendChild(span);
+          }
+          const delta = document.createElement('span');
+          delta.className = pct >= 0 ? 'row__win' : 'row__lose';
+          delta.textContent = pct >= 0 ? `−${pct}%` : `+${Math.abs(pct)}%`;
+          sub.appendChild(delta);
+        } else {
+          const span = document.createElement('span');
+          span.textContent = 'Working…';
+          sub.appendChild(span);
+        }
+
+        meta.append(name, sub);
+
+        const btns = document.createElement('div');
+        btns.className = 'row__btns';
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'iconbtn';
+        save.dataset.save = String(item.id);
+        save.disabled = item.status !== 'done';
+        save.setAttribute('aria-label', `Download ${item.outName ?? item.file.name}`);
+        save.innerHTML =
+          '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M4 20h16"/></svg>';
+
+        const drop = document.createElement('button');
+        drop.type = 'button';
+        drop.className = 'iconbtn';
+        drop.dataset.remove = String(item.id);
+        drop.setAttribute('aria-label', `Remove ${item.file.name}`);
+        drop.innerHTML =
+          '<svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M6 6l12 12M18 6 6 18"/></svg>';
+
+        btns.append(save, drop);
+        li.append(thumb, meta, btns);
+        return li;
+      }),
+    );
+  }
+
+  async function convertAll() {
+    const token = ++runToken;
+    const type = currentType();
+    const ext = ENCODE_TYPES[type].ext;
+    const cap = Number(maxEdge.value) || null;
+    const q = Number(quality.value) / 100;
+
+    // Names are made unique across the batch so a ZIP of photo.png + photo.jpg
+    // converted to the same format does not collide.
+    const taken = new Set<string>();
+
+    for (const item of items) {
+      if (token !== runToken) return;
+      try {
+        const { blob, from, to } = await convertImage({
+          file: item.file,
+          type,
+          quality: q,
+          maxEdge: cap,
+        });
+        if (token !== runToken) return;
+
+        releaseThumb(item);
+        item.blob = blob;
+        item.from = from;
+        item.to = to;
+        item.outName = uniqueName(withExtension(item.file.name, ext), taken);
+        taken.add(item.outName);
+        item.thumb = URL.createObjectURL(blob);
+        item.status = 'done';
+        item.error = undefined;
+      } catch (err) {
+        if (token !== runToken) return;
+        item.status = 'error';
+        item.blob = undefined;
+        item.error = err instanceof Error ? err.message : 'Could not convert';
+      }
+      render();
+    }
+  }
+
+  let debounce: number | undefined;
+  function scheduleConvert() {
+    // Mark everything pending immediately so the UI never shows stale numbers
+    // next to new settings.
+    for (const item of items) item.status = 'pending';
+    render();
+    window.clearTimeout(debounce);
+    debounce = window.setTimeout(() => void convertAll(), 220);
+  }
+
+  initDropzone('ic-file', {
+    accept: ['image/'],
+    paste: true,
+    onFiles: (files) => {
+      for (const file of files) items.push({ id: nextId++, file, status: 'pending' });
+      scheduleConvert();
+    },
+    onReject: (n) => toast(`Skipped ${n} file${n === 1 ? '' : 's'} — not an image`),
+  });
+
+  for (const control of [format, maxEdge]) {
+    control.addEventListener('change', () => {
+      syncQualityVisibility();
+      if (items.length) scheduleConvert();
+    });
+  }
+  quality.addEventListener('input', () => {
+    qualityOut.textContent = quality.value;
+    if (items.length && ENCODE_TYPES[currentType()].lossy) scheduleConvert();
+  });
+
+  list.addEventListener('click', (e) => {
+    const target = e.target as HTMLElement | null;
+
+    const saveId = target?.closest<HTMLElement>('[data-save]')?.dataset.save;
+    if (saveId) {
+      const item = items.find((i) => i.id === Number(saveId));
+      if (item?.blob && item.outName) downloadBlob(item.blob, item.outName);
+      return;
+    }
+
+    const removeId = target?.closest<HTMLElement>('[data-remove]')?.dataset.remove;
+    if (removeId) {
+      const item = items.find((i) => i.id === Number(removeId));
+      if (item) releaseThumb(item);
+      items = items.filter((i) => i.id !== Number(removeId));
+      render();
+    }
+  });
+
+  zipBtn.addEventListener('click', async () => {
+    const done = items.filter((i) => i.status === 'done' && i.blob);
+    if (!done.length) return;
+
+    zipBtn.disabled = true;
+    try {
+      const entries = await Promise.all(
+        done.map(async (i) => ({
+          name: i.outName!,
+          data: await blobBytes(i.blob!),
+        })),
+      );
+      downloadBlob(await zipFiles(entries), 'converted-images.zip');
+    } catch {
+      toast('Could not build the ZIP');
+    } finally {
+      zipBtn.disabled = false;
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    runToken++;
+    for (const item of items) releaseThumb(item);
+    items = [];
+    render();
+  });
+
+  // WebP encoding is missing on a few older browsers; drop the option rather
+  // than silently handing back a PNG with a .webp name.
+  void (async () => {
+    if (!(await canEncode('image/webp'))) {
+      const option = format.querySelector<HTMLOptionElement>('option[value="image/webp"]');
+      option?.remove();
+      note.textContent = 'This browser cannot encode WebP, so that option is hidden.';
+    }
+  })();
+
+  syncQualityVisibility();
+  render();
+</script>

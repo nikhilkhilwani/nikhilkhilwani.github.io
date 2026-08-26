@@ -1,0 +1,518 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+
+const PAGE_SIZES = [
+  { value: 'fit', label: 'Fit each page to its image' },
+  { value: 'a4', label: 'A4 — 210 × 297 mm' },
+  { value: 'letter', label: 'US Letter — 8.5 × 11 in' },
+  { value: 'a5', label: 'A5 — 148 × 210 mm' },
+  { value: 'a3', label: 'A3 — 297 × 420 mm' },
+];
+---
+
+<ToolLayout slug="image-to-pdf">
+  <div class="ip">
+    <Dropzone
+      id="ip-file"
+      accept="image/*"
+      multiple
+      icon="image"
+      label="Choose images, or drop them anywhere"
+      hint="They become pages in the order below. Drag a row, or use the arrows, to reorder."
+    />
+
+    <section class="panel">
+      <div class="ip__grid">
+        <div class="field">
+          <label for="ip-size">Page size</label>
+          <select id="ip-size">
+            {PAGE_SIZES.map((p) => <option value={p.value}>{p.label}</option>)}
+          </select>
+        </div>
+
+        <div class="field" id="ip-orient-field">
+          <label for="ip-orient">Orientation</label>
+          <select id="ip-orient">
+            <option value="auto" selected>Auto — match each image</option>
+            <option value="portrait">Portrait</option>
+            <option value="landscape">Landscape</option>
+          </select>
+        </div>
+
+        <div class="field" id="ip-margin-field">
+          <label for="ip-margin">Margin <output id="ip-margin-out">24 pt</output></label>
+          <input id="ip-margin" type="range" min="0" max="72" step="4" value="24" />
+        </div>
+      </div>
+
+      <p class="ip__note">
+        Photos are embedded as-is where possible, so a JPEG stays a JPEG and the
+        PDF does not grow. Formats a PDF cannot hold — WebP, AVIF, SVG — are
+        re-encoded first.
+      </p>
+    </section>
+
+    <section class="ip__bar" hidden id="ip-bar">
+      <div class="ip__stats">
+        <strong id="ip-count">0 pages</strong>
+        <span id="ip-total">—</span>
+      </div>
+      <div class="ip__actions">
+        <button id="ip-build" class="btn btn--solid btn--sm" type="button">
+          <Icon name="download" size={15} /> Build PDF
+        </button>
+        <button id="ip-clear" class="btn btn--sm" type="button">
+          <Icon name="trash" size={15} /> Clear
+        </button>
+      </div>
+    </section>
+
+    <p class="ip__err" id="ip-err" role="status" aria-live="polite"></p>
+
+    <ol class="ip__list" id="ip-list"></ol>
+  </div>
+</ToolLayout>
+
+<style>
+  .ip { display: grid; gap: clamp(14px, 2vw, 20px); }
+
+  .ip__grid { display: grid; gap: 1rem; }
+  @media (min-width: 640px) {
+    .ip__grid { grid-template-columns: repeat(3, minmax(0, 1fr)); align-items: start; }
+  }
+  .ip__grid .field > label { display: flex; justify-content: space-between; gap: 0.5rem; }
+  .ip__grid output { font-family: var(--mono); color: var(--ink-dim); }
+
+  .ip__note {
+    margin: 1rem 0 0;
+    font-size: 0.79rem;
+    color: var(--ink-faint);
+    line-height: 1.55;
+    max-width: 62ch;
+  }
+  .ip__err { margin: 0; font-size: 0.82rem; color: var(--bad); min-height: 1em; }
+
+  .ip__bar {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    align-items: center;
+    justify-content: space-between;
+  }
+  .ip__stats { display: flex; flex-direction: column; gap: 0.15rem; }
+  .ip__stats strong { font-weight: 400; font-size: 0.95rem; }
+  .ip__stats span { font-size: 0.8rem; color: var(--ink-faint); font-family: var(--mono); }
+  .ip__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+
+  .ip__list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.5rem;
+    counter-reset: page;
+  }
+
+  .prow {
+    display: grid;
+    grid-template-columns: auto 46px minmax(0, 1fr) auto;
+    gap: 0.75rem;
+    align-items: center;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    padding: 0.5rem 0.6rem;
+  }
+  .prow[draggable='true'] { cursor: grab; }
+  .prow[data-dragging] { opacity: 0.45; }
+  .prow[data-dropbefore] { box-shadow: 0 -2px 0 0 var(--accent); }
+  .prow[data-dropafter] { box-shadow: 0 2px 0 0 var(--accent); }
+
+  .prow__no {
+    counter-increment: page;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    min-width: 1.6em;
+    text-align: right;
+  }
+  .prow__no::before { content: counter(page); }
+
+  .prow__thumb {
+    width: 46px;
+    height: 46px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+    overflow: hidden;
+  }
+  .prow__thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+
+  .prow__meta { min-width: 0; display: flex; flex-direction: column; gap: 0.2rem; }
+  .prow__name { font-size: 0.9rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .prow__sub { font-size: 0.75rem; color: var(--ink-faint); font-family: var(--mono); }
+
+  .prow__btns { display: flex; gap: 0.25rem; }
+  .iconbtn {
+    font: inherit;
+    display: grid;
+    place-items: center;
+    width: 34px;
+    height: 34px;
+    border-radius: 8px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: color 0.18s, border-color 0.18s;
+  }
+  .iconbtn:hover { color: var(--accent); border-color: var(--accent); }
+  .iconbtn[disabled] { opacity: 0.35; cursor: default; }
+  .iconbtn[disabled]:hover { color: var(--ink-dim); border-color: var(--line); }
+</style>
+
+<script>
+  import { initDropzone } from '../../lib/ui/dropzone';
+  import { downloadBlob } from '../../lib/ui/download';
+  import { toast } from '../../lib/ui/clipboard';
+  import { decodeImage, sizeOf, releaseImage, drawToCanvas, canvasToBlob } from '../../lib/img/raster';
+  import { formatBytes, stemOf } from '../../lib/ui/files';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const sizeSel = $<HTMLSelectElement>('ip-size');
+  const orient = $<HTMLSelectElement>('ip-orient');
+  const orientField = $<HTMLDivElement>('ip-orient-field');
+  const marginRange = $<HTMLInputElement>('ip-margin');
+  const marginOut = $<HTMLOutputElement>('ip-margin-out');
+  const marginField = $<HTMLDivElement>('ip-margin-field');
+  const bar = $<HTMLElement>('ip-bar');
+  const list = $<HTMLOListElement>('ip-list');
+  const countEl = $<HTMLElement>('ip-count');
+  const totalEl = $<HTMLElement>('ip-total');
+  const buildBtn = $<HTMLButtonElement>('ip-build');
+  const clearBtn = $<HTMLButtonElement>('ip-clear');
+  const errEl = $<HTMLParagraphElement>('ip-err');
+
+  interface Page {
+    id: number;
+    file: File;
+    thumb: string;
+    width: number;
+    height: number;
+  }
+
+  // 1 pt = 1/72 in, which is the PDF user-space unit pdf-lib works in.
+  const PAGE_DIMS: Record<string, [number, number]> = {
+    a3: [841.89, 1190.55],
+    a4: [595.28, 841.89],
+    a5: [419.53, 595.28],
+    letter: [612, 792],
+  };
+
+  let pages: Page[] = [];
+  let nextId = 1;
+  let busy = false;
+
+  function render() {
+    bar.hidden = pages.length === 0;
+    countEl.textContent = `${pages.length} page${pages.length === 1 ? '' : 's'}`;
+    totalEl.textContent = pages.length
+      ? formatBytes(pages.reduce((sum, p) => sum + p.file.size, 0))
+      : '—';
+    buildBtn.disabled = busy || pages.length === 0;
+
+    list.replaceChildren(
+      ...pages.map((page, index) => {
+        const li = document.createElement('li');
+        li.className = 'prow';
+        li.draggable = true;
+        li.dataset.id = String(page.id);
+
+        const no = document.createElement('span');
+        no.className = 'prow__no';
+        no.setAttribute('aria-hidden', 'true');
+
+        const thumb = document.createElement('div');
+        thumb.className = 'prow__thumb';
+        const img = document.createElement('img');
+        img.src = page.thumb;
+        img.alt = '';
+        thumb.appendChild(img);
+
+        const meta = document.createElement('div');
+        meta.className = 'prow__meta';
+        const name = document.createElement('span');
+        name.className = 'prow__name';
+        name.textContent = page.file.name;
+        const sub = document.createElement('span');
+        sub.className = 'prow__sub';
+        sub.textContent = `${page.width}×${page.height} · ${formatBytes(page.file.size)}`;
+        meta.append(name, sub);
+
+        const btns = document.createElement('div');
+        btns.className = 'prow__btns';
+        btns.append(
+          iconButton('up', 'Move up', index === 0, { up: String(page.id) }),
+          iconButton('down', 'Move down', index === pages.length - 1, { down: String(page.id) }),
+          iconButton('x', `Remove ${page.file.name}`, false, { remove: String(page.id) }),
+        );
+
+        li.append(no, thumb, meta, btns);
+        return li;
+      }),
+    );
+  }
+
+  const GLYPHS: Record<string, string> = {
+    up: '<path d="M12 19V5M6 11l6-6 6 6"/>',
+    down: '<path d="M12 5v14M6 13l6 6 6-6"/>',
+    x: '<path d="M6 6l12 12M18 6 6 18"/>',
+  };
+
+  function iconButton(
+    glyph: string,
+    label: string,
+    disabled: boolean,
+    data: Record<string, string>,
+  ): HTMLButtonElement {
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'iconbtn';
+    btn.disabled = disabled;
+    btn.setAttribute('aria-label', label);
+    for (const [key, value] of Object.entries(data)) btn.dataset[key] = value;
+    btn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${GLYPHS[glyph]}</svg>`;
+    return btn;
+  }
+
+  function move(id: number, delta: number) {
+    const from = pages.findIndex((p) => p.id === id);
+    const to = from + delta;
+    if (from < 0 || to < 0 || to >= pages.length) return;
+    const [page] = pages.splice(from, 1);
+    pages.splice(to, 0, page);
+    render();
+  }
+
+  async function addFiles(files: File[]) {
+    for (const file of files) {
+      try {
+        const image = await decodeImage(file);
+        const { width, height } = sizeOf(image);
+        releaseImage(image);
+        pages.push({ id: nextId++, file, thumb: URL.createObjectURL(file), width, height });
+      } catch {
+        toast(`Skipped ${file.name} — could not read it`);
+      }
+    }
+    errEl.textContent = '';
+    render();
+  }
+
+  /**
+   * pdf-lib can embed JPEG and PNG only. Anything else — and any JPEG it
+   * rejects, such as a CMYK or 16-bit one — goes through a canvas first.
+   */
+  async function embeddable(file: File): Promise<{ bytes: Uint8Array; kind: 'jpg' | 'png' }> {
+    if (file.type === 'image/jpeg' || file.type === 'image/png') {
+      return {
+        bytes: new Uint8Array(await file.arrayBuffer()),
+        kind: file.type === 'image/jpeg' ? 'jpg' : 'png',
+      };
+    }
+    const image = await decodeImage(file);
+    try {
+      const canvas = drawToCanvas(image, sizeOf(image));
+      const blob = await canvasToBlob(canvas, 'image/png');
+      canvas.width = canvas.height = 0;
+      return { bytes: new Uint8Array(await blob.arrayBuffer()), kind: 'png' };
+    } finally {
+      releaseImage(image);
+    }
+  }
+
+  async function build() {
+    if (!pages.length || busy) return;
+    busy = true;
+    buildBtn.disabled = true;
+    const label = buildBtn.innerHTML;
+    buildBtn.textContent = 'Building…';
+    errEl.textContent = '';
+
+    try {
+      const { PDFDocument } = await import('pdf-lib');
+      const doc = await PDFDocument.create();
+      doc.setProducer('nikhilkhilwani.github.io');
+      doc.setCreator('nikhilkhilwani.github.io/tools/image-to-pdf');
+
+      const preset = sizeSel.value;
+      const margin = preset === 'fit' ? 0 : Number(marginRange.value);
+
+      for (const page of pages) {
+        const { bytes, kind } = await embeddable(page.file);
+        let embedded;
+        try {
+          embedded = kind === 'jpg' ? await doc.embedJpg(bytes) : await doc.embedPng(bytes);
+        } catch {
+          // A JPEG pdf-lib refuses: re-encode through the canvas and retry.
+          const image = await decodeImage(page.file);
+          const canvas = drawToCanvas(image, sizeOf(image));
+          releaseImage(image);
+          const png = await canvasToBlob(canvas, 'image/png');
+          canvas.width = canvas.height = 0;
+          embedded = await doc.embedPng(new Uint8Array(await png.arrayBuffer()));
+        }
+
+        if (preset === 'fit') {
+          // One page exactly the pixel size of the image, no margin, no scaling.
+          const sheet = doc.addPage([embedded.width, embedded.height]);
+          sheet.drawImage(embedded, {
+            x: 0,
+            y: 0,
+            width: embedded.width,
+            height: embedded.height,
+          });
+          continue;
+        }
+
+        const [shortSide, longSide] = PAGE_DIMS[preset] ?? PAGE_DIMS.a4;
+        const wantLandscape =
+          orient.value === 'landscape' ||
+          (orient.value === 'auto' && embedded.width > embedded.height);
+        const sheetW = wantLandscape ? longSide : shortSide;
+        const sheetH = wantLandscape ? shortSide : longSide;
+
+        const sheet = doc.addPage([sheetW, sheetH]);
+        const boxW = Math.max(1, sheetW - margin * 2);
+        const boxH = Math.max(1, sheetH - margin * 2);
+        // Contain, never crop, never enlarge past the box.
+        const scale = Math.min(boxW / embedded.width, boxH / embedded.height);
+        const drawW = embedded.width * scale;
+        const drawH = embedded.height * scale;
+
+        sheet.drawImage(embedded, {
+          x: (sheetW - drawW) / 2,
+          y: (sheetH - drawH) / 2,
+          width: drawW,
+          height: drawH,
+        });
+      }
+
+      const bytes = await doc.save();
+      // Copy into a plain ArrayBuffer so the Blob does not alias pdf-lib's heap.
+      const blob = new Blob([bytes.slice().buffer as ArrayBuffer], { type: 'application/pdf' });
+      const name = pages.length === 1 ? `${stemOf(pages[0].file.name)}.pdf` : 'images.pdf';
+      downloadBlob(blob, name);
+      toast(`Built a ${pages.length}-page PDF — ${formatBytes(blob.size)}`);
+    } catch (err) {
+      errEl.textContent =
+        err instanceof Error ? `Could not build the PDF: ${err.message}` : 'Could not build the PDF';
+    } finally {
+      busy = false;
+      buildBtn.innerHTML = label;
+      buildBtn.disabled = pages.length === 0;
+    }
+  }
+
+  /* ------------------------------------------------------------ reordering */
+
+  let dragId: number | null = null;
+
+  list.addEventListener('dragstart', (e) => {
+    const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('.prow');
+    if (!row) return;
+    dragId = Number(row.dataset.id);
+    row.setAttribute('data-dragging', '');
+    // Firefox will not start a drag without payload on the dataTransfer.
+    e.dataTransfer?.setData('text/plain', row.dataset.id ?? '');
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move';
+  });
+
+  list.addEventListener('dragover', (e) => {
+    if (dragId === null) return;
+    e.preventDefault();
+    const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('.prow');
+    for (const el of list.children) {
+      el.removeAttribute('data-dropbefore');
+      el.removeAttribute('data-dropafter');
+    }
+    if (!row || Number(row.dataset.id) === dragId) return;
+    const box = row.getBoundingClientRect();
+    const after = e.clientY > box.top + box.height / 2;
+    row.setAttribute(after ? 'data-dropafter' : 'data-dropbefore', '');
+  });
+
+  list.addEventListener('drop', (e) => {
+    if (dragId === null) return;
+    e.preventDefault();
+    const row = (e.target as HTMLElement | null)?.closest<HTMLElement>('.prow');
+    if (!row) return;
+
+    const targetId = Number(row.dataset.id);
+    if (targetId === dragId) return;
+
+    const box = row.getBoundingClientRect();
+    const after = e.clientY > box.top + box.height / 2;
+
+    const from = pages.findIndex((p) => p.id === dragId);
+    const [moved] = pages.splice(from, 1);
+    // Recompute after the splice: removing the dragged row shifts later indices.
+    const at = pages.findIndex((p) => p.id === targetId);
+    pages.splice(after ? at + 1 : at, 0, moved);
+
+    dragId = null;
+    render();
+  });
+
+  list.addEventListener('dragend', () => {
+    dragId = null;
+    render();
+  });
+
+  list.addEventListener('click', (e) => {
+    const el = e.target as HTMLElement | null;
+    const up = el?.closest<HTMLElement>('[data-up]')?.dataset.up;
+    if (up) return move(Number(up), -1);
+    const down = el?.closest<HTMLElement>('[data-down]')?.dataset.down;
+    if (down) return move(Number(down), 1);
+
+    const remove = el?.closest<HTMLElement>('[data-remove]')?.dataset.remove;
+    if (remove) {
+      const page = pages.find((p) => p.id === Number(remove));
+      if (page) URL.revokeObjectURL(page.thumb);
+      pages = pages.filter((p) => p.id !== Number(remove));
+      render();
+    }
+  });
+
+  function syncPresetFields() {
+    const fit = sizeSel.value === 'fit';
+    orientField.hidden = fit;
+    marginField.hidden = fit;
+  }
+
+  initDropzone('ip-file', {
+    accept: ['image/'],
+    paste: true,
+    onFiles: (files) => void addFiles(files),
+    onReject: (n) => toast(`Skipped ${n} file${n === 1 ? '' : 's'} — not an image`),
+  });
+
+  sizeSel.addEventListener('change', syncPresetFields);
+  marginRange.addEventListener('input', () => {
+    marginOut.textContent = `${marginRange.value} pt`;
+  });
+  buildBtn.addEventListener('click', () => void build());
+  clearBtn.addEventListener('click', () => {
+    for (const page of pages) URL.revokeObjectURL(page.thumb);
+    pages = [];
+    errEl.textContent = '';
+    render();
+  });
+
+  syncPresetFields();
+  render();
+</script>

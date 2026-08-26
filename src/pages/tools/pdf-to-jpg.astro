@@ -1,0 +1,467 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+
+const SCALES = [
+  { value: '1', label: '72 dpi — screen' },
+  { value: '1.5', label: '108 dpi' },
+  { value: '2', label: '144 dpi — good default' },
+  { value: '3', label: '216 dpi' },
+  { value: '4', label: '288 dpi — print' },
+];
+---
+
+<ToolLayout slug="pdf-to-jpg">
+  <div class="pj">
+    <Dropzone
+      id="pj-file"
+      accept="application/pdf"
+      icon="file-image"
+      label="Choose a PDF, or drop one anywhere"
+      hint="Rendered page by page in this tab. Encrypted files are fine — you will be asked for the password."
+    />
+
+    <section class="panel" id="pj-pass" hidden>
+      <div class="field">
+        <label for="pj-pass-input">This PDF is password-protected</label>
+        <div class="pj__passrow">
+          <input id="pj-pass-input" type="password" autocomplete="off" placeholder="Password" />
+          <button id="pj-pass-go" class="btn btn--solid btn--sm" type="button">Unlock</button>
+        </div>
+        <p class="pj__passerr" id="pj-pass-err" role="status" aria-live="polite"></p>
+      </div>
+    </section>
+
+    <section class="panel" id="pj-controls" hidden>
+      <div class="pj__grid">
+        <div class="field">
+          <label for="pj-format">Export as</label>
+          <select id="pj-format">
+            <option value="image/jpeg" selected>JPG</option>
+            <option value="image/png">PNG</option>
+          </select>
+        </div>
+
+        <div class="field">
+          <label for="pj-scale">Resolution</label>
+          <select id="pj-scale">
+            {SCALES.map((s) => <option value={s.value} selected={s.value === '2'}>{s.label}</option>)}
+          </select>
+        </div>
+
+        <div class="field" id="pj-quality-field">
+          <label for="pj-quality">Quality <output id="pj-quality-out">88</output></label>
+          <input id="pj-quality" type="range" min="40" max="100" step="1" value="88" />
+        </div>
+
+        <div class="field">
+          <label for="pj-range">Pages</label>
+          <input id="pj-range" type="text" placeholder="all" spellcheck="false" autocomplete="off" />
+        </div>
+      </div>
+
+      <p class="pj__hint" id="pj-hint">—</p>
+
+      <div class="pj__actions">
+        <button id="pj-run" class="btn btn--solid btn--sm" type="button">
+          <Icon name="image" size={15} /> Render pages
+        </button>
+        <button id="pj-zip" class="btn btn--sm" type="button" disabled>
+          <Icon name="download" size={15} /> Download all (ZIP)
+        </button>
+        <button id="pj-cancel" class="btn btn--sm" type="button" hidden>
+          <Icon name="x" size={15} /> Cancel
+        </button>
+        <button id="pj-clear" class="btn btn--sm" type="button">
+          <Icon name="trash" size={15} /> Clear
+        </button>
+      </div>
+
+      <div class="pj__progress" id="pj-progress" hidden>
+        <div class="pj__track"><span id="pj-fill"></span></div>
+        <p class="pj__pct mono" id="pj-pct">0%</p>
+      </div>
+    </section>
+
+    <p class="pj__err" id="pj-err" role="status" aria-live="polite"></p>
+
+    <ul class="pj__grid-out" id="pj-out"></ul>
+  </div>
+</ToolLayout>
+
+<style>
+  .pj { display: grid; gap: clamp(14px, 2vw, 20px); }
+
+  .pj__grid { display: grid; gap: 1rem; }
+  @media (min-width: 700px) {
+    .pj__grid { grid-template-columns: repeat(4, minmax(0, 1fr)); align-items: start; }
+  }
+  .pj__grid .field > label { display: flex; justify-content: space-between; gap: 0.5rem; }
+  .pj__grid output { font-family: var(--mono); color: var(--ink-dim); }
+
+  .pj__passrow { display: flex; gap: 0.5rem; flex-wrap: wrap; }
+  .pj__passrow input { flex: 1 1 12rem; }
+  .pj__passrow .btn { flex: 0 0 auto; }
+  .pj__passerr { margin: 0.5rem 0 0; font-size: 0.8rem; color: var(--bad); min-height: 1em; }
+
+  .pj__hint {
+    margin: 1rem 0 0;
+    font-size: 0.79rem;
+    color: var(--ink-faint);
+    line-height: 1.55;
+  }
+  .pj__err { margin: 0; font-size: 0.84rem; color: var(--bad); min-height: 1em; line-height: 1.5; }
+
+  .pj__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1.1rem; }
+
+  .pj__progress { display: flex; align-items: center; gap: 0.75rem; margin-top: 1rem; }
+  .pj__track {
+    flex: 1 1 auto;
+    height: 4px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, 0.09);
+    overflow: hidden;
+  }
+  .pj__track span {
+    display: block;
+    height: 100%;
+    width: 0;
+    background: var(--accent);
+    transition: width 0.2s linear;
+  }
+  .pj__pct { font-size: 0.76rem; color: var(--ink-faint); margin: 0; min-width: 3.2em; text-align: right; }
+
+  .pj__grid-out {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: repeat(auto-fill, minmax(126px, 1fr));
+  }
+  .page {
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--surface);
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+  }
+  .page__img {
+    display: block;
+    width: 100%;
+    height: auto;
+    background: #fff;
+    aspect-ratio: 1 / 1.294;
+    object-fit: contain;
+  }
+  .page__foot {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 0.4rem;
+    padding: 0.4rem 0.35rem 0.4rem 0.55rem;
+    border-top: 1px solid var(--line);
+  }
+  .page__no { font-family: var(--mono); font-size: 0.72rem; color: var(--ink-faint); }
+  .page__save {
+    font: inherit;
+    display: grid;
+    place-items: center;
+    width: 30px;
+    height: 30px;
+    border-radius: 7px;
+    border: 1px solid var(--line);
+    background: transparent;
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: color 0.18s, border-color 0.18s;
+  }
+  .page__save:hover { color: var(--accent); border-color: var(--accent); }
+</style>
+
+<script>
+  import { initDropzone } from '../../lib/ui/dropzone';
+  import { downloadBlob, zipFiles, blobBytes } from '../../lib/ui/download';
+  import { toast } from '../../lib/ui/clipboard';
+  import { canvasToBlob } from '../../lib/img/raster';
+  import { openPdf, PasswordRequired } from '../../lib/pdf/pdfjs';
+  import { formatBytes, pageLabel, parsePageRange, stemOf } from '../../lib/ui/files';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const passPanel = $<HTMLElement>('pj-pass');
+  const passInput = $<HTMLInputElement>('pj-pass-input');
+  const passGo = $<HTMLButtonElement>('pj-pass-go');
+  const passErr = $<HTMLParagraphElement>('pj-pass-err');
+
+  const controls = $<HTMLElement>('pj-controls');
+  const format = $<HTMLSelectElement>('pj-format');
+  const scaleSel = $<HTMLSelectElement>('pj-scale');
+  const quality = $<HTMLInputElement>('pj-quality');
+  const qualityOut = $<HTMLOutputElement>('pj-quality-out');
+  const qualityField = $<HTMLDivElement>('pj-quality-field');
+  const rangeInput = $<HTMLInputElement>('pj-range');
+  const hint = $<HTMLParagraphElement>('pj-hint');
+  const errEl = $<HTMLParagraphElement>('pj-err');
+
+  const runBtn = $<HTMLButtonElement>('pj-run');
+  const zipBtn = $<HTMLButtonElement>('pj-zip');
+  const cancelBtn = $<HTMLButtonElement>('pj-cancel');
+  const clearBtn = $<HTMLButtonElement>('pj-clear');
+
+  const progress = $<HTMLElement>('pj-progress');
+  const fill = $<HTMLElement>('pj-fill');
+  const pct = $<HTMLElement>('pj-pct');
+  const out = $<HTMLUListElement>('pj-out');
+
+  interface Rendered {
+    page: number;
+    blob: Blob;
+    name: string;
+    url: string;
+  }
+
+  let file: File | null = null;
+  let pageCount = 0;
+  let rendered: Rendered[] = [];
+  let running = false;
+  let cancelled = false;
+
+  const revokeAll = () => {
+    for (const item of rendered) URL.revokeObjectURL(item.url);
+    rendered = [];
+  };
+
+  function setHint() {
+    if (!pageCount) {
+      hint.textContent = '—';
+      return;
+    }
+    const pages = parsePageRange(rangeInput.value, pageCount);
+    const ext = format.value === 'image/png' ? 'PNG' : 'JPG';
+    hint.textContent = `${pageCount} page${pageCount === 1 ? '' : 's'} in the file · ${pages.length} selected · ${ext} at ${scaleSel.options[scaleSel.selectedIndex].text}`;
+    runBtn.disabled = running || pages.length === 0;
+  }
+
+  function renderOut() {
+    zipBtn.disabled = rendered.length === 0;
+    out.replaceChildren(
+      ...rendered.map((item) => {
+        const li = document.createElement('li');
+        li.className = 'page';
+
+        const img = document.createElement('img');
+        img.className = 'page__img';
+        img.src = item.url;
+        img.loading = 'lazy';
+        img.alt = `Page ${item.page}`;
+
+        const foot = document.createElement('div');
+        foot.className = 'page__foot';
+        const no = document.createElement('span');
+        no.className = 'page__no';
+        no.textContent = `p${item.page} · ${formatBytes(item.blob.size)}`;
+
+        const save = document.createElement('button');
+        save.type = 'button';
+        save.className = 'page__save';
+        save.dataset.save = String(item.page);
+        save.setAttribute('aria-label', `Download page ${item.page}`);
+        save.innerHTML =
+          '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12M7.5 10.5 12 15l4.5-4.5M4 20h16"/></svg>';
+
+        foot.append(no, save);
+        li.append(img, foot);
+        return li;
+      }),
+    );
+  }
+
+  function setProgress(done: number, total: number) {
+    progress.hidden = total === 0;
+    const ratio = total ? done / total : 0;
+    fill.style.width = `${Math.round(ratio * 100)}%`;
+    pct.textContent = `${done}/${total}`;
+  }
+
+  /** Opens the file, handling the password round trip. */
+  async function probe(password?: string) {
+    if (!file) return;
+    errEl.textContent = '';
+    try {
+      // A fresh copy each time: pdf.js transfers the buffer to its worker.
+      const { doc, pages } = await openPdf(new Uint8Array(await file.arrayBuffer()), password);
+      pageCount = pages;
+      // Only needed for the count here; the render pass reopens the file.
+      // v6 hangs teardown off the loading task, not the document proxy.
+      await doc.loadingTask.destroy();
+
+      passPanel.hidden = true;
+      passErr.textContent = '';
+      controls.hidden = false;
+      setHint();
+    } catch (err) {
+      if (err instanceof PasswordRequired) {
+        passPanel.hidden = false;
+        controls.hidden = true;
+        passErr.textContent = err.wrong ? 'That password did not work' : '';
+        passInput.focus();
+        return;
+      }
+      controls.hidden = true;
+      errEl.textContent = err instanceof Error ? err.message : 'Could not open that PDF';
+    }
+  }
+
+  async function run() {
+    if (!file || running || !pageCount) return;
+
+    const pages = parsePageRange(rangeInput.value, pageCount);
+    if (!pages.length) {
+      errEl.textContent = 'That page range selects nothing';
+      return;
+    }
+
+    running = true;
+    cancelled = false;
+    errEl.textContent = '';
+    runBtn.disabled = true;
+    cancelBtn.hidden = false;
+    revokeAll();
+    renderOut();
+    setProgress(0, pages.length);
+
+    const type = format.value;
+    const ext = type === 'image/png' ? 'png' : 'jpg';
+    const q = Number(quality.value) / 100;
+    const scale = Number(scaleSel.value) || 2;
+    const stem = stemOf(file.name) || 'page';
+
+    let doc: Awaited<ReturnType<typeof openPdf>>['doc'] | null = null;
+    try {
+      const opened = await openPdf(new Uint8Array(await file.arrayBuffer()), passInput.value || undefined);
+      doc = opened.doc;
+
+      for (const [index, pageNo] of pages.entries()) {
+        if (cancelled) break;
+
+        const page = await doc.getPage(pageNo);
+        const viewport = page.getViewport({ scale });
+
+        const canvas = document.createElement('canvas');
+        // Round up: a fractional canvas size silently crops the right/bottom edge.
+        canvas.width = Math.ceil(viewport.width);
+        canvas.height = Math.ceil(viewport.height);
+        const ctx = canvas.getContext('2d');
+        if (!ctx) throw new Error('Could not get a 2D canvas context');
+
+        // JPEG has no alpha, so an unpainted PDF background would come out black.
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        // pdf.js v6 wants the canvas itself; canvasContext alone is deprecated.
+        await page.render({ canvas, canvasContext: ctx, viewport }).promise;
+
+        const blob = await canvasToBlob(canvas, type, type === 'image/png' ? undefined : q);
+        canvas.width = canvas.height = 0;
+        page.cleanup();
+
+        rendered.push({
+          page: pageNo,
+          blob,
+          name: `${stem}-${pageLabel(pageNo, pageCount)}.${ext}`,
+          url: URL.createObjectURL(blob),
+        });
+        renderOut();
+        setProgress(index + 1, pages.length);
+
+        // Yield so the progress bar paints and Cancel stays clickable.
+        await new Promise((resolve) => window.setTimeout(resolve, 0));
+      }
+
+      if (cancelled) toast(`Stopped after ${rendered.length} page${rendered.length === 1 ? '' : 's'}`);
+      else if (rendered.length) toast(`Rendered ${rendered.length} page${rendered.length === 1 ? '' : 's'}`);
+    } catch (err) {
+      errEl.textContent = err instanceof Error ? err.message : 'Rendering failed';
+    } finally {
+      await doc?.loadingTask.destroy();
+      running = false;
+      cancelBtn.hidden = true;
+      progress.hidden = true;
+      setHint();
+      renderOut();
+    }
+  }
+
+  initDropzone('pj-file', {
+    // Some systems hand over an empty type for .pdf, so the extension is the
+    // fallback inside initDropzone.
+    accept: ['application/pdf'],
+    onFiles: (files) => {
+      file = files[0];
+      pageCount = 0;
+      passInput.value = '';
+      revokeAll();
+      renderOut();
+      void probe();
+    },
+    onReject: () => toast('That is not a PDF'),
+  });
+
+  passGo.addEventListener('click', () => void probe(passInput.value));
+  passInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') void probe(passInput.value);
+  });
+
+  format.addEventListener('change', () => {
+    qualityField.hidden = format.value === 'image/png';
+    setHint();
+  });
+  scaleSel.addEventListener('change', setHint);
+  rangeInput.addEventListener('input', setHint);
+  quality.addEventListener('input', () => {
+    qualityOut.textContent = quality.value;
+  });
+
+  runBtn.addEventListener('click', () => void run());
+  cancelBtn.addEventListener('click', () => {
+    cancelled = true;
+  });
+
+  out.addEventListener('click', (e) => {
+    const id = (e.target as HTMLElement | null)?.closest<HTMLElement>('[data-save]')?.dataset.save;
+    if (!id) return;
+    const item = rendered.find((r) => r.page === Number(id));
+    if (item) downloadBlob(item.blob, item.name);
+  });
+
+  zipBtn.addEventListener('click', async () => {
+    if (!rendered.length) return;
+    zipBtn.disabled = true;
+    try {
+      const entries = await Promise.all(
+        rendered.map(async (r) => ({ name: r.name, data: await blobBytes(r.blob) })),
+      );
+      const stem = file ? stemOf(file.name) : 'pages';
+      downloadBlob(await zipFiles(entries), `${stem || 'pages'}-pages.zip`);
+    } catch {
+      toast('Could not build the ZIP');
+    } finally {
+      zipBtn.disabled = false;
+    }
+  });
+
+  clearBtn.addEventListener('click', () => {
+    cancelled = true;
+    file = null;
+    pageCount = 0;
+    passInput.value = '';
+    revokeAll();
+    renderOut();
+    controls.hidden = true;
+    passPanel.hidden = true;
+    errEl.textContent = '';
+  });
+</script>

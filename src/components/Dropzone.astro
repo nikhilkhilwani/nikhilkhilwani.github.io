@@ -1,0 +1,76 @@
+---
+import Icon from './Icon.astro';
+
+interface Props {
+  /** id of the <input type="file">; the wiring module looks it up. */
+  id: string;
+  accept: string;
+  multiple?: boolean;
+  label: string;
+  hint: string;
+  icon?: string;
+}
+
+const { id, accept, multiple = false, label, hint, icon = 'file-out' } = Astro.props;
+---
+
+<div class="dz" data-dz={id}>
+  <input
+    id={id}
+    class="sr-only dz__input"
+    type="file"
+    accept={accept}
+    multiple={multiple}
+  />
+  <label for={id} class="dz__face">
+    <span class="dz__icon"><Icon name={icon} size={20} /></span>
+    <span class="dz__text">
+      <strong>{label}</strong>
+      <small>{hint}</small>
+    </span>
+  </label>
+</div>
+
+<style>
+  .dz {
+    position: relative;
+    border: 1px dashed var(--line-strong);
+    border-radius: var(--r);
+    background: rgba(255, 255, 255, 0.015);
+    transition: border-color 0.18s, background 0.18s;
+  }
+  /* Set by dropzone.ts while a file is dragged over the page. */
+  .dz[data-over] {
+    border-color: var(--accent);
+    background: rgba(110, 231, 215, 0.06);
+  }
+  .dz__face {
+    display: flex;
+    align-items: center;
+    gap: 0.85rem;
+    padding: clamp(16px, 3vw, 22px);
+    cursor: pointer;
+    min-height: 88px;
+  }
+  .dz__icon {
+    flex: 0 0 auto;
+    width: 40px;
+    height: 40px;
+    display: grid;
+    place-items: center;
+    border-radius: 10px;
+    border: 1px solid var(--line-strong);
+    color: var(--accent);
+    background: rgba(110, 231, 215, 0.06);
+  }
+  .dz__text { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
+  .dz__text strong { font-weight: 400; font-size: 0.98rem; }
+  .dz__text small { color: var(--ink-faint); font-size: 0.78rem; line-height: 1.5; }
+
+  /* The input is visually hidden but must stay focusable for keyboard users. */
+  .dz__input:focus-visible + .dz__face {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+    border-radius: var(--r);
+  }
+</style>

@@ -22,10 +22,17 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 22
+          # 24, not 22: the test scripts import .ts modules directly and rely on
+          # Node's built-in type stripping being on by default.
+          node-version: 24
           cache: npm
       - run: npm ci
+      - run: npm run check
+      - run: npm test
       - run: npm run build
+      # Verifies the built pages against their scripts — catches an id typo
+      # that neither TypeScript nor the unit tests can see.
+      - run: node scripts/test-dom.mjs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist
