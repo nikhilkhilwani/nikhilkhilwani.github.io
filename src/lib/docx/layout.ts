@@ -48,9 +48,22 @@ export interface TypeScale {
   h3: number;
   /** Multiplied by the font size to get the baseline-to-baseline distance. */
   lineHeight: number;
+  /**
+   * The font's OWN single line height, as a multiple of the font size. Word's
+   * "single" spacing means exactly this, so it is what w:line/240 multiplies.
+   * Carlito is 1.2207; the fallback matches it because Carlito is the body face.
+   */
+  singleLine?: number;
 }
 
-export const DEFAULT_SCALE: TypeScale = { body: 11, h1: 20, h2: 15.5, h3: 12.5, lineHeight: 1.38 };
+export const DEFAULT_SCALE: TypeScale = {
+  body: 11,
+  h1: 20,
+  h2: 15.5,
+  h3: 12.5,
+  lineHeight: 1.38,
+  singleLine: 1.2207,
+};
 
 /** Superscript and subscript are drawn at this fraction of the body size. */
 export const SCRIPT_SCALE = 0.72;
@@ -109,6 +122,19 @@ export interface LayoutOptions {
 /** The subset of Word paragraph properties this layout honours. */
 export interface BlockAppearance {
   align?: Align;
+  /** Space before/after in points, straight from w:spacing. */
+  spaceBefore?: number;
+  spaceAfter?: number;
+  /** Line spacing as a multiple of the font's single line height. */
+  lineMultiple?: number;
+  /** Fixed line height in points. */
+  lineExact?: number;
+  /** lineExact is a floor rather than an exact value. */
+  lineAtLeast?: boolean;
+  /** Drop the gap between consecutive paragraphs of the same kind. */
+  contextualSpacing?: boolean;
+  /** Start this block on a fresh page. */
+  pageBreakBefore?: boolean;
   /** Overrides the type scale for this block. */
   size?: number;
   /** Left indent in points. */
@@ -419,49 +445,127 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
         height = width * 0.75;
       }
 
-      if (!room(height + 12)) newPage();
-      y -= 6;
+      // Padding proportional to the image rather than a flat 6pt each side. A
+      // divider rule 1pt tall does not want 12pt of air around it: eight of them
+      // cost 96pt, which was the last thing keeping a 2-page resume on 3 pages.
+      const pad = Math.min(6, Math.max(1, height * 0.25));
+
+      if (!room(height + pad * 2)) newPage();
+      y -= pad;
       items.push({ kind: 'image', x: geometry.margin, y: y - height, width, height, dataUri: block.dataUri });
-      y -= height + 6;
+      y -= height + pad;
       continue;
     }
 
     if (block.kind === 'table') {
-      const columns = tableColumns(block.rows);
-      const widths = columnWidths(columns, textWidth);
       const padding = 4;
       const gap = 8;
+      const rowCount = block.rows.length;
 
-      for (const row of block.rows) {
-        // Wrap every cell first, at its true spanned width, so the row height
-        // is known before anything is committed to a page.
-        let column = 0;
-        const measured = row.map((cellItem) => {
-          const span = Math.max(1, cellItem.span);
-          const width = spanWidth(widths, column, span, gap);
-          const start = column;
-          column += span;
-          return { cellItem, start, span, width, lines: wrapRuns(cellItem.runs, scale.body, width - padding * 2, measure) };
-        });
+      /* --- place every cell on a grid --- */
 
-        const rowHeight =
-          Math.max(
-            scale.body * scale.lineHeight,
-            ...measured.map((m) => m.lines.length * scale.body * scale.lineHeight),
-          ) + padding * 2;
+      // A vertically merged cell keeps occupying its column in later rows, and
+      // mammoth omits the continuation cells entirely. So the second row of a
+      // vMerge has fewer <td>s, and without tracking occupancy its first cell
+      // would be assigned column 0 and drawn underneath the spanning one.
+      const occupied: boolean[][] = Array.from({ length: rowCount }, () => []);
+      const placed: {
+        cell: Cell;
+        row: number;
+        start: number;
+        span: number;
+        rowSpan: number;
+        lines: Line[];
+      }[] = [];
+      let columns = 1;
 
-        if (!room(rowHeight)) newPage();
+      for (let r = 0; r < rowCount; r++) {
+        let c = 0;
+        for (const cell of block.rows[r]) {
+          while (occupied[r][c]) c++;
+          const span = Math.max(1, cell.span);
+          // Clamped so a rowspan reaching past the last row cannot run away.
+          const rowSpan = Math.min(Math.max(1, cell.rowSpan ?? 1), rowCount - r);
+          placed.push({ cell, row: r, start: c, span, rowSpan, lines: [] });
+          for (let rr = r; rr < r + rowSpan; rr++) {
+            for (let cc = c; cc < c + span; cc++) occupied[rr][cc] = true;
+          }
+          c += span;
+          columns = Math.max(columns, c);
+        }
+      }
 
-        for (const m of measured) {
-          const x = geometry.margin + columnOffset(widths, m.start, gap);
-          items.push({ kind: 'cellBox', x, y: y - rowHeight, width: m.width, height: rowHeight });
-          let ty = y - padding - scale.body;
-          for (const line of m.lines) {
+      const widths = columnWidths(columns, textWidth);
+      const cellLine = scale.body * scale.lineHeight;
+
+      /* --- size the rows --- */
+
+      const rowHeights = new Array<number>(rowCount).fill(cellLine + padding * 2);
+      for (const item of placed) {
+        const width = spanWidth(widths, item.start, item.span, gap);
+        item.lines = wrapRuns(item.cell.runs, scale.body, width - padding * 2, measure);
+        if (item.rowSpan === 1) {
+          rowHeights[item.row] = Math.max(
+            rowHeights[item.row],
+            item.lines.length * cellLine + padding * 2,
+          );
+        }
+      }
+      // A spanning cell taller than the rows it covers grows the last of them,
+      // which is what keeps its text inside its own box.
+      for (const item of placed) {
+        if (item.rowSpan === 1) continue;
+        const need = item.lines.length * cellLine + padding * 2;
+        let have = 0;
+        for (let rr = item.row; rr < item.row + item.rowSpan; rr++) have += rowHeights[rr];
+        if (need > have) rowHeights[item.row + item.rowSpan - 1] += need - have;
+      }
+
+      /* --- paginate, keeping merged rows together --- */
+
+      // Rows joined by a vertical merge cannot be split, or the cell box would
+      // be drawn on one page and its lower half lost.
+      const reach = Array.from({ length: rowCount }, (_, r) => r);
+      for (const item of placed) {
+        const last = item.row + item.rowSpan - 1;
+        for (let rr = item.row; rr <= last; rr++) reach[rr] = Math.max(reach[rr], last);
+      }
+
+      let r = 0;
+      while (r < rowCount) {
+        let end = reach[r];
+        for (let rr = r; rr <= end; rr++) end = Math.max(end, reach[rr]);
+
+        let groupHeight = 0;
+        for (let rr = r; rr <= end; rr++) groupHeight += rowHeights[rr];
+        if (!room(groupHeight)) newPage();
+
+        const top = y;
+        const offset = new Array<number>(rowCount).fill(0);
+        let acc = 0;
+        for (let rr = r; rr <= end; rr++) {
+          offset[rr] = acc;
+          acc += rowHeights[rr];
+        }
+
+        for (const item of placed) {
+          if (item.row < r || item.row > end) continue;
+          const x = geometry.margin + columnOffset(widths, item.start, gap);
+          const width = spanWidth(widths, item.start, item.span, gap);
+          let height = 0;
+          for (let rr = item.row; rr < item.row + item.rowSpan; rr++) height += rowHeights[rr];
+
+          const cellTop = top - offset[item.row];
+          items.push({ kind: 'cellBox', x, y: cellTop - height, width, height });
+          let ty = cellTop - padding - scale.body;
+          for (const line of item.lines) {
             items.push({ kind: 'line', x: x + padding, y: ty, line });
-            ty -= scale.body * scale.lineHeight;
+            ty -= cellLine;
           }
         }
-        y -= rowHeight;
+
+        y -= groupHeight;
+        r = end + 1;
       }
       y -= 8;
       continue;
@@ -470,8 +574,26 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
     /* --- heading, paragraph, list item --- */
 
     const look = options.appearance?.(block) ?? {};
+
+    // An explicit page break, before anything else is measured. Guarded on
+    // items.length so a break on the very first block does not emit a blank
+    // leading page.
+    if (look.pageBreakBefore && items.length) newPage();
+
     const size = look.size ?? sizeFor(block, scale);
-    const lineHeight = size * scale.lineHeight;
+
+    // Word's "single" spacing is the font's own line height, not a round
+    // number, and w:line is a multiple of that. Falling back to scale.lineHeight
+    // only when the document says nothing keeps hand-built callers unchanged.
+    const single = size * (scale.singleLine ?? 1.2207);
+    const lineHeight =
+      look.lineExact !== undefined
+        ? look.lineAtLeast
+          ? Math.max(look.lineExact, single)
+          : look.lineExact
+        : look.lineMultiple !== undefined
+          ? single * look.lineMultiple
+          : size * scale.lineHeight;
 
     const listIndent = block.kind === 'listItem' ? 18 * block.level : 0;
     const markerWidth = block.kind === 'listItem' ? 18 : 0;
@@ -498,7 +620,15 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
       alignLine(line, align, available, i === wrapped.length - 1),
     );
 
-    const spaceBefore = block.kind === 'heading' ? size * 0.85 : scale.body * 0.5;
+    const previous = blocks[index - 1];
+    const sameAsPrevious = previous !== undefined && previous.kind === block.kind;
+    const defaultBefore = block.kind === 'heading' ? size * 0.85 : scale.body * 0.5;
+    const spaceBefore =
+      look.contextualSpacing && sameAsPrevious ? 0 : (look.spaceBefore ?? defaultBefore);
+    const spaceAfter =
+      look.contextualSpacing && blocks[index + 1]?.kind === block.kind
+        ? 0
+        : (look.spaceAfter ?? (block.kind === 'heading' ? size * 0.25 : 0));
 
     const needed =
       block.kind === 'heading'
@@ -551,7 +681,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
       y -= lineHeight - size;
     }
 
-    if (block.kind === 'heading' && blocks[index + 1]) y -= size * 0.25;
+    if (blocks[index + 1]) y -= spaceAfter;
   }
 
   pages.push({ items });

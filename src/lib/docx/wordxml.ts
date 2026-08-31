@@ -40,6 +40,25 @@ export interface ParagraphProps {
   /** First-line indent in points; negative for a hanging indent. */
   firstLine?: number;
   tabs?: TabStop[];
+  /** Space before the paragraph, in points. */
+  spaceBefore?: number;
+  /** Space after the paragraph, in points. */
+  spaceAfter?: number;
+  /**
+   * Line spacing as a multiple of the font's own single line height, from
+   * w:line with w:lineRule="auto" (w:line is in 240ths of a line).
+   */
+  lineMultiple?: number;
+  /** Fixed baseline-to-baseline distance in points, from "exact" or "atLeast". */
+  lineExact?: number;
+  /** True when lineExact came from "atLeast", so it is a floor, not a value. */
+  lineAtLeast?: boolean;
+  /** Suppress spacing between consecutive paragraphs of the same style. */
+  contextualSpacing?: boolean;
+  /** w:pStyle, so style-level defaults can be resolved. */
+  styleId?: string;
+  /** This paragraph starts a new page. */
+  pageBreakBefore?: boolean;
 }
 
 export interface PageSetup {
@@ -113,15 +132,49 @@ export const normalizeText = (text: string): string => text.replace(/\s+/g, ' ')
  * Only `<w:p>` outside tables is returned, so the result lines up with the
  * paragraph-like blocks mammoth produces.
  */
-export function readParagraphProps(documentXml: string): ParagraphProps[] {
+export function readParagraphProps(
+  documentXml: string,
+  styles?: StyleDefs,
+): ParagraphProps[] {
   const body = withoutTables(documentXml);
   const out: ParagraphProps[] = [];
+  /** Set by an empty paragraph whose only content was a page break. */
+  let pendingBreak = false;
 
   for (const paragraph of body.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []) {
     const props: ParagraphProps = { text: paragraphText(paragraph) };
 
     // Paragraph properties sit in the first <w:pPr>, before any run.
     const pPr = /<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/.exec(paragraph)?.[1] ?? '';
+
+    // Style first, so anything the paragraph states directly overwrites it.
+    const styleId = attrOf(pPr, 'w:pStyle') ?? undefined;
+    if (styleId) props.styleId = styleId;
+    const inherited = styleId ? styles?.byId.get(styleId) : undefined;
+    if (inherited) Object.assign(props, inherited);
+
+    /* --- explicit page breaks --- */
+
+    if (/<w:pageBreakBefore\b(?![^>]*w:val\s*=\s*"(?:0|false)")/.test(pPr)) {
+      props.pageBreakBefore = true;
+    }
+
+    // <w:br w:type="page"/> breaks at the point it appears. Word writers very
+    // often put one in a paragraph of its own, and mammoth drops that paragraph
+    // entirely, so the flag has to carry forward to the next one with text.
+    const brIndex = paragraph.search(/<w:br\b[^>]*w:type\s*=\s*"page"/);
+    if (brIndex >= 0) {
+      const firstText = paragraph.search(/<w:t[\s>]/);
+      if (props.text.trim() === '') pendingBreak = true;
+      else if (firstText < 0 || brIndex < firstText) props.pageBreakBefore = true;
+      // A break after some text splits a paragraph mid-flow, which this subset
+      // does not reproduce; the text still renders, just without the break.
+    }
+
+    if (pendingBreak && props.text.trim() !== '') {
+      props.pageBreakBefore = true;
+      pendingBreak = false;
+    }
 
     const jc = attrOf(pPr, 'w:jc');
     if (jc && ALIGN[jc]) props.align = ALIGN[jc];
@@ -147,6 +200,37 @@ export function readParagraphProps(documentXml: string): ParagraphProps[] {
       tabs.push({ pos: twips(pos), align });
     }
     if (tabs.length) props.tabs = tabs.sort((a, b) => a.pos - b.pos);
+
+    // Spacing. Ignoring this is what made a single-spaced 2-page resume come
+    // out at 3 pages: Word asked for line=240 auto (one line) and after=0, and
+    // the defaults here added 38% leading plus a gap before every paragraph.
+    const spacingXml = /<w:spacing\b[^>]*\/?>/.exec(pPr)?.[0] ?? '';
+    if (spacingXml) {
+      const val = (name: string) =>
+        new RegExp(name + '\\s*=\\s*"([^"]*)"').exec(spacingXml)?.[1];
+      const before = val('w:before');
+      const after = val('w:after');
+      const line = val('w:line');
+      const rule = val('w:lineRule') ?? 'auto';
+
+      if (before !== undefined) props.spaceBefore = Math.max(0, twips(before));
+      if (after !== undefined) props.spaceAfter = Math.max(0, twips(after));
+
+      if (line !== undefined) {
+        if (rule === 'exact' || rule === 'atLeast') {
+          props.lineExact = Math.max(0, twips(line));
+          props.lineAtLeast = rule === 'atLeast';
+        } else {
+          // 240ths of a line, so 240 is single and 360 is one-and-a-half.
+          const multiple = (Number(line) || 240) / 240;
+          if (multiple > 0 && multiple < 10) props.lineMultiple = multiple;
+        }
+      }
+    }
+
+    // <w:contextualSpacing/> is on; an explicit w:val="0" turns it off again.
+    const ctx = /<w:contextualSpacing\b([^>]*)\/?>/.exec(pPr);
+    if (ctx && !/w:val\s*=\s*"(0|false)"/.test(ctx[1])) props.contextualSpacing = true;
 
     // Size: half-points, taken from the paragraph mark or its first run. A
     // paragraph mixing sizes therefore takes its first run's — reading every
@@ -334,4 +418,123 @@ export function intrinsicSize(dataUri: string): ImageExtent | null {
   }
 
   return null;
+}
+
+/**
+ * Paragraph-level defaults a style contributes.
+ *
+ * Deliberately excludes anything from <w:docDefaults>. Two reasons: the tool
+ * offers a body-size slider that the reader chose, and a document whose Heading
+ * styles declare no size would otherwise inherit the default body size and
+ * render every heading flat. Only sizes a style states explicitly are applied.
+ */
+export interface StyleProps {
+  size?: number;
+  align?: Align;
+  indent?: number;
+  firstLine?: number;
+  spaceBefore?: number;
+  spaceAfter?: number;
+  lineMultiple?: number;
+  lineExact?: number;
+  lineAtLeast?: boolean;
+  contextualSpacing?: boolean;
+}
+
+export interface StyleDefs {
+  /** By styleId, with w:basedOn chains already flattened. */
+  byId: Map<string, StyleProps>;
+}
+
+/** Reads the <w:spacing>/<w:jc>/<w:ind> shape shared by styles and paragraphs. */
+function readSpacingLike(pPr: string): StyleProps {
+  const out: StyleProps = {};
+
+  const jc = attrOf(pPr, 'w:jc');
+  if (jc && ALIGN[jc]) out.align = ALIGN[jc];
+
+  const indXml = /<w:ind\b[^>]*\/?>/.exec(pPr)?.[0] ?? '';
+  if (indXml) {
+    const left =
+      /w:left\s*=\s*"([^"]*)"/.exec(indXml)?.[1] ?? /w:start\s*=\s*"([^"]*)"/.exec(indXml)?.[1];
+    const firstLine = /w:firstLine\s*=\s*"([^"]*)"/.exec(indXml)?.[1];
+    const hanging = /w:hanging\s*=\s*"([^"]*)"/.exec(indXml)?.[1];
+    if (left !== undefined) out.indent = twips(left);
+    if (firstLine !== undefined) out.firstLine = twips(firstLine);
+    else if (hanging !== undefined) out.firstLine = -twips(hanging);
+  }
+
+  const spacingXml = /<w:spacing\b[^>]*\/?>/.exec(pPr)?.[0] ?? '';
+  if (spacingXml) {
+    const val = (name: string) => new RegExp(name + '\\s*=\\s*"([^"]*)"').exec(spacingXml)?.[1];
+    const before = val('w:before');
+    const after = val('w:after');
+    const line = val('w:line');
+    const rule = val('w:lineRule') ?? 'auto';
+    if (before !== undefined) out.spaceBefore = Math.max(0, twips(before));
+    if (after !== undefined) out.spaceAfter = Math.max(0, twips(after));
+    if (line !== undefined) {
+      if (rule === 'exact' || rule === 'atLeast') {
+        out.lineExact = Math.max(0, twips(line));
+        out.lineAtLeast = rule === 'atLeast';
+      } else {
+        const multiple = (Number(line) || 240) / 240;
+        if (multiple > 0 && multiple < 10) out.lineMultiple = multiple;
+      }
+    }
+  }
+
+  const ctx = /<w:contextualSpacing\b([^>]*)\/?>/.exec(pPr);
+  if (ctx && !/w:val\s*=\s*"(0|false)"/.test(ctx[1])) out.contextualSpacing = true;
+
+  return out;
+}
+
+/**
+ * Reads word/styles.xml into flattened per-style properties.
+ *
+ * This is what makes headings the size the document says rather than the size
+ * this tool guessed, and it also carries style-level spacing and indent, which
+ * most real templates set once on a style rather than on every paragraph.
+ */
+export function readStyles(stylesXml: string): StyleDefs {
+  const raw = new Map<string, { props: StyleProps; basedOn?: string }>();
+
+  for (const style of stylesXml.match(/<w:style\b[^>]*>[\s\S]*?<\/w:style>/g) ?? []) {
+    const open = /<w:style\b[^>]*>/.exec(style)?.[0] ?? '';
+    const type = /w:type\s*=\s*"([^"]*)"/.exec(open)?.[1] ?? 'paragraph';
+    if (type !== 'paragraph') continue;
+    const id = /w:styleId\s*=\s*"([^"]*)"/.exec(open)?.[1];
+    if (!id) continue;
+
+    const pPr = /<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/.exec(style)?.[1] ?? '';
+    const props = readSpacingLike(pPr);
+
+    // Size lives in the style's run properties, in half-points.
+    const rPr = /<w:rPr\b[^>]*>([\s\S]*?)<\/w:rPr>/.exec(style)?.[1] ?? '';
+    const sz = attrOf(rPr, 'w:sz');
+    if (sz) {
+      const points = (Number(sz) || 0) / 2;
+      if (points >= 4 && points <= 200) props.size = points;
+    }
+
+    raw.set(id, { props, basedOn: attrOf(style, 'w:basedOn') ?? undefined });
+  }
+
+  // Flatten w:basedOn, guarding against a cycle in a hand-edited file.
+  const byId = new Map<string, StyleProps>();
+  const resolve = (id: string, seen: Set<string>): StyleProps => {
+    const done = byId.get(id);
+    if (done) return done;
+    const entry = raw.get(id);
+    if (!entry || seen.has(id)) return {};
+    seen.add(id);
+    const parent = entry.basedOn ? resolve(entry.basedOn, seen) : {};
+    const merged = { ...parent, ...entry.props };
+    byId.set(id, merged);
+    return merged;
+  };
+  for (const id of raw.keys()) resolve(id, new Set());
+
+  return { byId };
 }

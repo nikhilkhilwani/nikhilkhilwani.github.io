@@ -25,7 +25,7 @@ import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
 import { loadFonts, browserFontSource, needsFromFlags, type FontSource, type StyleKey } from './fonts.ts';
 import { LATIN, RTL_SCRIPTS, scriptFont, scriptsIn } from './scripts.ts';
 import {
-  readParagraphProps, readPageSetup, correlate, readImageExtents, intrinsicSize,
+  readParagraphProps, readPageSetup, correlate, readImageExtents, intrinsicSize, readStyles,
   type PageSetup,
 } from './wordxml.ts';
 import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
@@ -171,8 +171,15 @@ export async function docxToPdf(
 
   try {
     const { unzipSync, strFromU8 } = await import('fflate');
-    const entries = unzipSync(input.slice(), { filter: (f) => f.name === 'word/document.xml' });
+    const entries = unzipSync(input.slice(), {
+      filter: (f) => f.name === 'word/document.xml' || f.name === 'word/styles.xml',
+    });
     const documentXml = entries['word/document.xml'] ? strFromU8(entries['word/document.xml']) : '';
+    // Styles carry heading sizes and the spacing most templates set once on a
+    // style rather than on every paragraph. Absent styles.xml is fine.
+    const styles = entries['word/styles.xml']
+      ? readStyles(strFromU8(entries['word/styles.xml']))
+      : undefined;
 
     if (documentXml) {
       // Image display sizes, matched to the image blocks in document order.
@@ -189,14 +196,27 @@ export async function docxToPdf(
       }
 
       pageSetup = readPageSetup(documentXml);
-      const props = readParagraphProps(documentXml);
+      const props = readParagraphProps(documentXml, styles);
       const matched = correlate(blocks, props);
       styled = matched.applied;
       unstyled = matched.skipped;
       appearanceFor = (block) => {
         const p = matched.attach(block);
         if (!p) return undefined;
-        return { align: p.align, size: p.size, indent: p.indent, firstLine: p.firstLine, tabs: p.tabs };
+        return {
+          align: p.align,
+          size: p.size,
+          indent: p.indent,
+          firstLine: p.firstLine,
+          tabs: p.tabs,
+          spaceBefore: p.spaceBefore,
+          spaceAfter: p.spaceAfter,
+          lineMultiple: p.lineMultiple,
+          lineExact: p.lineExact,
+          lineAtLeast: p.lineAtLeast,
+          contextualSpacing: p.contextualSpacing,
+          pageBreakBefore: p.pageBreakBefore,
+        };
       };
     }
   } catch {
@@ -292,9 +312,20 @@ export async function docxToPdf(
     }
   };
 
+  // The font's own single line height, which is what Word's "single" spacing
+  // means. Measured from the embedded face rather than assumed, so a different
+  // body font would still paginate like Word.
+  let singleLine = scale.singleLine;
+  try {
+    const probe = pick(LATIN, false, false).heightAtSize(100) / 100;
+    if (Number.isFinite(probe) && probe > 0.5 && probe < 3) singleLine = probe;
+  } catch {
+    // Keep whatever the scale already had.
+  }
+
   const laid: LaidOutPage[] = layout(blocks, {
     geometry: pageBox,
-    scale,
+    scale: { ...scale, singleLine },
     measure,
     maxImageWidth: pageBox.width - pageBox.margin * 2,
     appearance: appearanceFor,
@@ -495,8 +526,9 @@ export function describeConversion(result: ConvertResult): string {
 
 export const LAYOUT_CAVEATS = [
   'Font colours and highlighting are not carried over, and a paragraph mixing sizes takes its first size',
-  'Headers, footers, page numbers, footnotes and explicit page breaks are not carried over',
-  'Columns, text boxes, shapes and vertically merged cells are not reproduced',
+  'Headers, footers, page numbers and footnotes are not carried over',
+  'A page break in the middle of a paragraph is not reproduced; one before a paragraph, or on its own, is',
+  'Columns, text boxes and shapes are not reproduced',
   'A line mixing Arabic or Hebrew with left-to-right text is laid out in logical order, not visual order',
   'Indic, Arabic, Hebrew and Thai text is drawn at a single weight — bold and italic are not synthesised for those scripts',
 ] as const;

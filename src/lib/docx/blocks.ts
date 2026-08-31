@@ -12,7 +12,7 @@
  *   super/sub   -> <sup> / <sub>
  *   links       -> <a href="…">
  *   nested list -> nested <ol> / <ul>, up to any depth
- *   merged cell -> colspan="n"   (vMerge/rowspan is NOT translated)
+ *   merged cell -> colspan="n" and rowspan="n"
  *   page break  -> nothing at all, so it cannot be honoured here
  *
  * Pure. Covered by scripts/test-tools.mjs.
@@ -34,6 +34,12 @@ export interface Cell {
   runs: Run[];
   /** Columns this cell spans, from colspan. */
   span: number;
+  /**
+   * Rows this cell spans, from rowspan. mammoth does translate w:vMerge into
+   * rowspan, so this only needed reading — the work was teaching layout that
+   * later rows have fewer cells because earlier ones still occupy the column.
+   */
+  rowSpan?: number;
 }
 
 export type Block =
@@ -219,6 +225,7 @@ export function parseBlocks(html: string): Block[] {
   let runs: Run[] = [];
   let current: { kind: 'heading'; level: 1 | 2 | 3 } | { kind: 'paragraph' } | { kind: 'listItem' } | null = null;
 
+  let cellRowSpan = 1;
   let table: Cell[][] | null = null;
   let row: Cell[] | null = null;
   let cell: Run[] | null = null;
@@ -376,13 +383,20 @@ export function parseBlocks(html: string): Block[] {
       case 'td':
       case 'th':
         if (tag.closing) {
-          if (row && cell) row.push({ runs: tidyRuns(cell), span: cellSpan });
+          if (row && cell) {
+            const entry: Cell = { runs: tidyRuns(cell), span: cellSpan };
+            if (cellRowSpan > 1) entry.rowSpan = cellRowSpan;
+            row.push(entry);
+          }
           cell = null;
           cellSpan = 1;
+          cellRowSpan = 1;
         } else {
           cell = [];
           const span = Number(attr(tag.attrs, 'colspan') ?? '1');
           cellSpan = Number.isFinite(span) && span >= 1 ? Math.floor(span) : 1;
+          const rows = Number(attr(tag.attrs, 'rowspan') ?? '1');
+          cellRowSpan = Number.isFinite(rows) && rows >= 1 ? Math.floor(rows) : 1;
         }
         break;
 

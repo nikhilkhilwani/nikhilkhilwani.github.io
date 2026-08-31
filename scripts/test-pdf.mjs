@@ -842,6 +842,148 @@ const plain = await makePlain();
     ok(ruledText.includes(`Section ${i}`), `word: section ${i} heading survived alongside the rules`);
   }
   ok(ruledText.includes(`Body text under section ${RULES}.`), 'word: the last paragraph is present');
+
+  /* --- styles.xml, page breaks and vertical merges, end to end --- */
+
+  // pdf.js reports each text item's size and position, so heading sizes and
+  // column alignment can be asserted from the real output rather than inferred.
+  const itemsOf = async (bytes) => {
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false }).promise;
+    const out = [];
+    for (let n = 1; n <= doc.numPages; n++) {
+      const content = await (await doc.getPage(n)).getTextContent();
+      for (const it of content.items) {
+        if (!it.str.trim()) continue;
+        out.push({ page: n, str: it.str, size: it.height, x: it.transform[4] });
+      }
+    }
+    return out;
+  };
+
+  const styled = (docBody, stylesBody) =>
+    zipSync({
+      '[Content_Types].xml': strToU8(
+        '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+          '<Default Extension="xml" ContentType="application/xml"/>' +
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+          '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/></Types>',
+      ),
+      '_rels/.rels': strToU8(
+        '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+      ),
+      'word/styles.xml': strToU8(
+        `<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">${stylesBody}</w:styles>`,
+      ),
+      'word/document.xml': strToU8(
+        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+          `<w:body>${docBody}</w:body></w:document>`,
+      ),
+    });
+
+  /* styles.xml drives heading size */
+
+  const HEAD_STYLES =
+    '<w:style w:type="paragraph" w:styleId="Heading1">' +
+    '<w:pPr><w:jc w:val="center"/></w:pPr><w:rPr><w:sz w:val="52"/></w:rPr></w:style>';
+
+  const headed = await docxToPdf(
+    styled(
+      '<w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>BIG HEADING</w:t></w:r></w:p>' +
+        p('ordinary body text here'),
+      HEAD_STYLES,
+    ),
+  );
+  const headItems = await itemsOf(headed.bytes);
+  const heading = headItems.find((i) => i.str.includes('BIG HEADING'));
+  const body = headItems.find((i) => i.str.includes('ordinary body'));
+  ok(heading !== undefined && body !== undefined, 'word: heading and body both rendered');
+  ok(
+    Math.abs(heading.size - 26) < 1.5,
+    `word: the heading is drawn at the 26pt its style declares (got ${heading.size.toFixed(1)}pt)`,
+  );
+  ok(heading.size > body.size * 2, 'word: and is much larger than the body text');
+  ok(heading.x > body.x + 20, `word: the style's centre alignment moved the heading right (${heading.x.toFixed(0)} vs ${body.x.toFixed(0)})`);
+
+  // Without styles.xml the same document falls back to the built-in scale, so
+  // the assertion above is really testing styles.xml and not a coincidence.
+  const unstyledHead = await docxToPdf(
+    zipSync({
+      '[Content_Types].xml': strToU8(
+        '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+          '<Default Extension="xml" ContentType="application/xml"/>' +
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      ),
+      '_rels/.rels': strToU8(
+        '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+      ),
+      'word/document.xml': strToU8(
+        '<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
+          '<w:body><w:p><w:pPr><w:pStyle w:val="Heading1"/></w:pPr><w:r><w:t>BIG HEADING</w:t></w:r></w:p></w:body></w:document>',
+      ),
+    }),
+  );
+  const plainHeading = (await itemsOf(unstyledHead.bytes)).find((i) => i.str.includes('BIG HEADING'));
+  ok(
+    Math.abs(plainHeading.size - 26) > 3,
+    `word: with no styles.xml the heading uses the built-in scale instead (${plainHeading.size.toFixed(1)}pt)`,
+  );
+
+  /* explicit page breaks */
+
+  const noBreak = await docxToPdf(build(p('first') + p('second')));
+  eq(noBreak.pages, 1, 'word: two short paragraphs share a page');
+
+  const withBreak = await docxToPdf(
+    build(p('first') + '<w:p><w:pPr><w:pageBreakBefore/></w:pPr><w:r><w:t>second</w:t></w:r></w:p>'),
+  );
+  eq(withBreak.pages, 2, 'word: w:pageBreakBefore starts a new page');
+  const breakItems = await itemsOf(withBreak.bytes);
+  eq(breakItems.find((i) => i.str.includes('first')).page, 1, 'word: the first paragraph is on page 1');
+  eq(breakItems.find((i) => i.str.includes('second')).page, 2, 'word: the second is on page 2');
+
+  // The common authoring shape: a break alone in its own paragraph.
+  const loneBreak = await docxToPdf(
+    build(p('before') + '<w:p><w:r><w:br w:type="page"/></w:r></w:p>' + p('after')),
+  );
+  eq(loneBreak.pages, 2, 'word: a break in its own paragraph also starts a page');
+  const loneItems = await itemsOf(loneBreak.bytes);
+  eq(loneItems.find((i) => i.str.includes('before')).page, 1, 'word: content before the break stays on page 1');
+  eq(loneItems.find((i) => i.str.includes('after')).page, 2, 'word: content after it moves to page 2');
+
+  /* vertically merged cells */
+
+  const merged = await docxToPdf(
+    build(
+      '<w:tbl>' +
+        '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>MERGEDCELL</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>ROWONE</w:t></w:r></w:p></w:tc></w:tr>' +
+        '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>ROWTWO</w:t></w:r></w:p></w:tc></w:tr>' +
+        '<w:tr><w:tc><w:p><w:r><w:t>THIRDA</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>THIRDB</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+    ),
+  );
+  const cells = await itemsOf(merged.bytes);
+  const at = (needle) => cells.find((i) => i.str.includes(needle));
+  for (const name of ['MERGEDCELL', 'ROWONE', 'ROWTWO', 'THIRDA', 'THIRDB']) {
+    ok(at(name) !== undefined, `word: merged table kept "${name}"`);
+  }
+  // The continuation row has one <td>, which belongs in column 2. Without the
+  // occupancy grid it would be drawn in column 1, under the merged cell.
+  ok(
+    Math.abs(at('ROWTWO').x - at('THIRDB').x) < 1,
+    `word: the continuation cell sits in column 2 (${at('ROWTWO').x.toFixed(0)} vs ${at('THIRDB').x.toFixed(0)})`,
+  );
+  ok(
+    at('ROWTWO').x > at('THIRDA').x + 20,
+    'word: and not back in column 1 underneath the merged cell',
+  );
+  ok(
+    Math.abs(at('MERGEDCELL').x - at('THIRDA').x) < 1,
+    'word: the merged cell itself is in column 1',
+  );
 }
 
 

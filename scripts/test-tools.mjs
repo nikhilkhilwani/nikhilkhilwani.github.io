@@ -36,7 +36,7 @@ import {
 } from '../src/lib/docx/scripts.ts';
 import { readImageExtents, intrinsicSize, EMU } from '../src/lib/docx/wordxml.ts';
 import {
-  twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables,
+  twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables, readStyles,
 } from '../src/lib/docx/wordxml.ts';
 
 let fail = 0;
@@ -1263,6 +1263,339 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
     geometry: A4, scale: DEFAULT_SCALE, measure,
   });
   ok(guessed.length >= 1, 'an image with no size at all still lays out');
+}
+
+
+/* ---------------------------------------------- paragraph spacing (w:spacing) */
+
+// Ignoring w:spacing is what kept a single-spaced 2-page resume on 3 pages: Word
+// asked for line=240 auto (exactly one line) with after=0, while the defaults
+// here added 38% leading plus a gap before every paragraph.
+
+{
+  const para = (pPr, text) => `<w:p><w:pPr>${pPr}</w:pPr><w:r><w:t>${text}</w:t></w:r></w:p>`;
+  const doc = (body) => `<w:document><w:body>${body}</w:body></w:document>`;
+
+  const props = readParagraphProps(
+    doc(
+      para('<w:spacing w:after="0" w:before="62" w:line="240" w:lineRule="auto"/>', 'single') +
+        para('<w:spacing w:before="240" w:after="120" w:line="360" w:lineRule="auto"/>', 'one and a half') +
+        para('<w:spacing w:line="300" w:lineRule="exact"/>', 'exact') +
+        para('<w:spacing w:line="300" w:lineRule="atLeast"/>', 'at least') +
+        para('<w:contextualSpacing/>', 'contextual on') +
+        para('<w:contextualSpacing w:val="0"/>', 'contextual off') +
+        para('', 'nothing declared'),
+    ),
+  );
+  eq(props.length, 7, 'seven paragraphs read');
+
+  // 62 twips is 3.1pt; after=0 must survive as 0, not be lost as falsy.
+  ok(Math.abs(props[0].spaceBefore - 3.1) < 0.01, `before 62tw becomes ${props[0].spaceBefore}pt`);
+  eq(props[0].spaceAfter, 0, 'after="0" is recorded as 0, not dropped');
+  ok(Math.abs(props[0].lineMultiple - 1) < 0.001, 'line=240 auto is single spacing');
+
+  ok(Math.abs(props[1].spaceBefore - 12) < 0.01, 'before 240tw becomes 12pt');
+  ok(Math.abs(props[1].spaceAfter - 6) < 0.01, 'after 120tw becomes 6pt');
+  ok(Math.abs(props[1].lineMultiple - 1.5) < 0.001, 'line=360 auto is one-and-a-half');
+
+  ok(Math.abs(props[2].lineExact - 15) < 0.01, 'lineRule=exact gives a fixed 15pt');
+  eq(props[2].lineAtLeast, false, 'and is explicitly not a floor');
+  eq(props[2].lineMultiple, undefined, 'nor as a multiple');
+
+  ok(Math.abs(props[3].lineExact - 15) < 0.01, 'lineRule=atLeast also gives 15pt');
+  eq(props[3].lineAtLeast, true, 'but is marked as a floor');
+
+  eq(props[4].contextualSpacing, true, '<w:contextualSpacing/> is on');
+  eq(props[5].contextualSpacing, undefined, 'w:val="0" turns it off again');
+  eq(props[6].spaceBefore, undefined, 'a paragraph declaring nothing reports nothing');
+  eq(props[6].lineMultiple, undefined, 'and no line spacing either');
+}
+
+{
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const long = { kind: 'paragraph', runs: [{ text: 'word '.repeat(40).trim() }] };
+
+  // Single spacing must pack more lines onto a page than the roomier default.
+  const asSingle = layout([long], {
+    geometry: A4,
+    scale: DEFAULT_SCALE,
+    measure,
+    appearance: () => ({ lineMultiple: 1 }),
+  });
+  const asDefault = layout([long], { geometry: A4, scale: DEFAULT_SCALE, measure });
+
+  const spanOf = (pages) => {
+    const ys = pages[0].items.filter((i) => i.kind === 'line').map((i) => i.y);
+    return Math.max(...ys) - Math.min(...ys);
+  };
+  ok(
+    spanOf(asSingle) < spanOf(asDefault),
+    `single spacing is tighter than the default (${spanOf(asSingle).toFixed(1)}pt vs ${spanOf(asDefault).toFixed(1)}pt)`,
+  );
+
+  // singleLine is the font's own line height, so it drives that calculation.
+  const wide = layout([long], {
+    geometry: A4,
+    scale: { ...DEFAULT_SCALE, singleLine: 2 },
+    measure,
+    appearance: () => ({ lineMultiple: 1 }),
+  });
+  ok(spanOf(wide) > spanOf(asSingle), 'a taller singleLine spreads the same lines further');
+
+  // An exact line height is obeyed literally.
+  const exact = layout([long], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+    appearance: () => ({ lineExact: 30 }),
+  });
+  const exactYs = exact[0].items.filter((i) => i.kind === 'line').map((i) => i.y);
+  ok(exactYs.length >= 2, 'the exact-spaced paragraph wrapped');
+  ok(Math.abs((exactYs[0] - exactYs[1]) - 30) < 0.01, 'baselines sit exactly 30pt apart');
+
+  // atLeast is a floor: a small value must not squash the line.
+  const floorish = layout([long], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+    appearance: () => ({ lineExact: 2, lineAtLeast: true }),
+  });
+  const floorYs = floorish[0].items.filter((i) => i.kind === 'line').map((i) => i.y);
+  ok(floorYs[0] - floorYs[1] > 10, 'atLeast=2pt is raised to the font single line height');
+}
+
+{
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const one = { kind: 'paragraph', runs: [{ text: 'short' }] };
+  const two = { kind: 'paragraph', runs: [{ text: 'also short' }] };
+
+  const gapBetween = (appearance) => {
+    const pages = layout([one, two], { geometry: A4, scale: DEFAULT_SCALE, measure, appearance });
+    const ys = pages[0].items.filter((i) => i.kind === 'line').map((i) => i.y);
+    return ys[0] - ys[1];
+  };
+
+  const declared = gapBetween(() => ({ spaceBefore: 40, spaceAfter: 0 }));
+  const none = gapBetween(() => ({ spaceBefore: 0, spaceAfter: 0 }));
+  ok(declared > none + 30, `a 40pt spaceBefore opens the gap (${declared.toFixed(1)} vs ${none.toFixed(1)})`);
+
+  // contextualSpacing drops the gap between two paragraphs of the same kind.
+  const contextual = gapBetween(() => ({ spaceBefore: 40, contextualSpacing: true }));
+  ok(
+    contextual < declared - 30,
+    `contextualSpacing suppresses it between like paragraphs (${contextual.toFixed(1)})`,
+  );
+}
+
+{
+  // Image padding scales with the image: a hairline rule must not carry 12pt of
+  // air, which is what kept the resume from fitting on two pages.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const at = (height) => {
+    const pages = layout([{ kind: 'image', dataUri: 'data:,', width: 500, height }], {
+      geometry: A4, scale: DEFAULT_SCALE, measure,
+    });
+    const img = pages[0].items.find((i) => i.kind === 'image');
+    // Space consumed above the image, from the top of the text area.
+    return A4.height - A4.margin - (img.y + img.height);
+  };
+  ok(at(1) < 2, `a 1pt rule takes under 2pt of padding above it (${at(1).toFixed(2)}pt)`);
+  ok(at(200) >= 5.9, `a 200pt image still gets full padding (${at(200).toFixed(2)}pt)`);
+}
+
+
+/* ------------------------------------------------------------ styles.xml */
+
+// Headings used to be whatever size this tool guessed. The resume that exposed
+// it declares Heading1 at 26pt centred and Heading2 at 11pt, with no direct
+// formatting on the paragraphs at all - so the guess was simply wrong.
+
+{
+  const style = (id, body, basedOn) =>
+    `<w:style w:type="paragraph" w:styleId="${id}">` +
+    (basedOn ? `<w:basedOn w:val="${basedOn}"/>` : '') +
+    body +
+    '</w:style>';
+
+  const xml =
+    '<w:styles>' +
+    // docDefaults must be ignored: the tool has a body-size slider, and a
+    // Heading style with no size would otherwise inherit the body size.
+    '<w:docDefaults><w:rPrDefault><w:rPr><w:sz w:val="40"/></w:rPr></w:rPrDefault>' +
+    '<w:pPrDefault><w:pPr><w:spacing w:before="999"/></w:pPr></w:pPrDefault></w:docDefaults>' +
+    style('Normal', '<w:pPr><w:spacing w:after="120"/></w:pPr>') +
+    style('Heading1', '<w:pPr><w:jc w:val="center"/><w:spacing w:before="65"/></w:pPr><w:rPr><w:sz w:val="52"/></w:rPr>') +
+    style('Sub', '<w:pPr><w:ind w:left="720"/></w:pPr>', 'Heading1') +
+    style('CharOnly', '<w:rPr><w:sz w:val="99"/></w:rPr>').replace('w:type="paragraph"', 'w:type="character"') +
+    '</w:styles>';
+
+  const defs = readStyles(xml);
+
+  eq(defs.byId.get('Heading1').size, 26, 'Heading1 sz=52 half-points becomes 26pt');
+  eq(defs.byId.get('Heading1').align, 'center', 'Heading1 is centred');
+  ok(Math.abs(defs.byId.get('Heading1').spaceBefore - 3.25) < 0.01, 'Heading1 before 65tw is 3.25pt');
+  ok(Math.abs(defs.byId.get('Normal').spaceAfter - 6) < 0.01, 'Normal after 120tw is 6pt');
+
+  // basedOn is flattened, and the child's own values win.
+  const sub = defs.byId.get('Sub');
+  eq(sub.size, 26, 'Sub inherits its size from Heading1 via basedOn');
+  eq(sub.align, 'center', 'and its alignment');
+  ok(Math.abs(sub.indent - 36) < 0.01, 'while keeping its own 720tw indent');
+
+  eq(defs.byId.has('CharOnly'), false, 'a character style is not a paragraph style');
+  eq(defs.byId.get('Normal').size, undefined, 'docDefaults sz is NOT applied - the size slider must survive');
+  eq(defs.byId.get('Normal').spaceBefore, undefined, 'nor is docDefaults spacing');
+
+  // A basedOn cycle must not hang.
+  const cyclic = readStyles(
+    '<w:styles>' + style('A', '', 'B') + style('B', '', 'A') + '</w:styles>',
+  );
+  eq(cyclic.byId.size, 2, 'a basedOn cycle resolves rather than looping forever');
+
+  eq(readStyles('<w:styles/>').byId.size, 0, 'an empty styles part yields nothing');
+}
+
+{
+  // Style values seed a paragraph; anything it states directly overrides them.
+  const styles = readStyles(
+    '<w:styles><w:style w:type="paragraph" w:styleId="H">' +
+      '<w:pPr><w:jc w:val="center"/><w:spacing w:before="200" w:after="100"/></w:pPr>' +
+      '<w:rPr><w:sz w:val="40"/></w:rPr></w:style></w:styles>',
+  );
+  const doc = (pPr, text) =>
+    `<w:document><w:body><w:p><w:pPr>${pPr}</w:pPr><w:r><w:t>${text}</w:t></w:r></w:p></w:body></w:document>`;
+
+  const inherited = readParagraphProps(doc('<w:pStyle w:val="H"/>', 'x'), styles)[0];
+  eq(inherited.styleId, 'H', 'the style id is recorded');
+  eq(inherited.size, 20, 'the size comes from the style');
+  eq(inherited.align, 'center', 'so does the alignment');
+  ok(Math.abs(inherited.spaceBefore - 10) < 0.01, 'and the spacing');
+
+  const overridden = readParagraphProps(
+    doc('<w:pStyle w:val="H"/><w:jc w:val="right"/><w:spacing w:before="0"/>', 'x'),
+    styles,
+  )[0];
+  eq(overridden.align, 'right', 'a direct w:jc beats the style');
+  eq(overridden.spaceBefore, 0, 'a direct before=0 beats the style, and survives as 0');
+  eq(overridden.size, 20, 'the style size still applies where nothing overrides it');
+
+  const noStyles = readParagraphProps(doc('<w:pStyle w:val="H"/>', 'x'))[0];
+  eq(noStyles.size, undefined, 'without a styles part nothing is inherited');
+  eq(noStyles.styleId, 'H', 'but the style id is still reported');
+}
+
+/* ------------------------------------------------- explicit page breaks */
+
+{
+  const body = (inner) => `<w:document><w:body>${inner}</w:body></w:document>`;
+  const para = (pPr, runs) => `<w:p><w:pPr>${pPr}</w:pPr>${runs}</w:p>`;
+  const text = (t) => `<w:r><w:t>${t}</w:t></w:r>`;
+  const brPage = '<w:r><w:br w:type="page"/></w:r>';
+
+  const explicit = readParagraphProps(
+    body(para('', text('one')) + para('<w:pageBreakBefore/>', text('two'))),
+  );
+  eq(explicit[0].pageBreakBefore, undefined, 'the first paragraph has no break');
+  eq(explicit[1].pageBreakBefore, true, 'w:pageBreakBefore starts a page');
+
+  const disabled = readParagraphProps(
+    body(para('<w:pageBreakBefore w:val="0"/>', text('two'))),
+  );
+  eq(disabled[0].pageBreakBefore, undefined, 'w:val="0" turns the break off');
+
+  // The common shape: a break alone in its own paragraph. mammoth drops that
+  // paragraph, so the flag has to carry to the next one with text.
+  const carried = readParagraphProps(
+    body(para('', text('before')) + para('', brPage) + para('', text('after'))),
+  );
+  eq(carried.length, 3, 'all three source paragraphs are seen');
+  eq(carried[0].pageBreakBefore, undefined, 'the paragraph before the break is untouched');
+  eq(carried[2].pageBreakBefore, true, 'the paragraph after an empty break paragraph starts a page');
+
+  const leading = readParagraphProps(body(para('', brPage + text('same para'))));
+  eq(leading[0].pageBreakBefore, true, 'a break before any text breaks that paragraph');
+
+  const trailing = readParagraphProps(body(para('', text('words') + brPage)));
+  eq(trailing[0].pageBreakBefore, undefined, 'a break after text is not reproduced, and is not misapplied');
+}
+
+{
+  const measure = (t, st) => t.length * st.size * 0.5;
+  const p = (text) => ({ kind: 'paragraph', runs: [{ text }] });
+
+  const plain = layout([p('one'), p('two')], { geometry: A4, scale: DEFAULT_SCALE, measure });
+  eq(plain.length, 1, 'two short paragraphs share a page');
+
+  const broken = layout([p('one'), p('two')], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+    appearance: (b) => (b.runs[0].text === 'two' ? { pageBreakBefore: true } : {}),
+  });
+  eq(broken.length, 2, 'a page break puts the second paragraph on its own page');
+  eq(broken[0].items.length, 1, 'the first page keeps only the first paragraph');
+
+  const leadingBreak = layout([p('one')], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+    appearance: () => ({ pageBreakBefore: true }),
+  });
+  eq(leadingBreak.length, 1, 'a break on the very first block does not emit a blank leading page');
+}
+
+/* --------------------------------------------- vertically merged cells */
+
+{
+  const cell = (text, extra = {}) => ({ runs: [{ text }], span: 1, ...extra });
+  const measure = (t, st) => t.length * st.size * 0.5;
+
+  const table = {
+    kind: 'table',
+    rows: [
+      [cell('spans two', { rowSpan: 2 }), cell('r1c2')],
+      // mammoth omits the continuation cell, so this row has ONE td which
+      // actually belongs in column 2.
+      [cell('r2c2')],
+      [cell('r3c1'), cell('r3c2')],
+    ],
+  };
+
+  const pages = layout([table], { geometry: A4, scale: DEFAULT_SCALE, measure });
+  const boxes = pages[0].items.filter((i) => i.kind === 'cellBox');
+  const lines = pages[0].items.filter((i) => i.kind === 'line');
+  eq(boxes.length, 5, 'five cells were drawn (the continuation is not a cell)');
+
+  const textAt = (needle) => lines.find((l) => l.line.pieces.some((pc) => pc.text.includes(needle)));
+  const boxNear = (x) => boxes.filter((b) => Math.abs(b.x - x) < 1);
+
+  const spanning = textAt('spans');
+  const r2c2 = textAt('r2c2');
+  const r3c1 = textAt('r3c1');
+  const r3c2 = textAt('r3c2');
+  ok(spanning && r2c2 && r3c1 && r3c2, 'every cell kept its text');
+
+  // The occupancy grid is the whole point: r2c2 must sit in column 2, lined up
+  // with r3c2, not back at column 1 underneath the spanning cell.
+  ok(Math.abs(r2c2.x - r3c2.x) < 0.5, `r2c2 is in column 2, aligned with r3c2 (${r2c2.x.toFixed(1)} vs ${r3c2.x.toFixed(1)})`);
+  ok(r2c2.x > r3c1.x + 10, 'and is well to the right of column 1');
+  ok(Math.abs(spanning.x - r3c1.x) < 0.5, 'the spanning cell is in column 1');
+
+  // Its box covers both rows, so it is taller than a single-row box.
+  const spanBox = boxNear(A4.margin).sort((a, b) => b.height - a.height)[0];
+  const singleBox = boxNear(A4.margin).sort((a, b) => a.height - b.height)[0];
+  ok(spanBox.height > singleBox.height * 1.7, `the merged box spans two rows (${spanBox.height.toFixed(1)} vs ${singleBox.height.toFixed(1)})`);
+
+  // Without a rowspan the same table lays out as three ordinary rows.
+  const flat = layout(
+    [{ kind: 'table', rows: [[cell('a'), cell('b')], [cell('c'), cell('d')]] }],
+    { geometry: A4, scale: DEFAULT_SCALE, measure },
+  );
+  eq(flat[0].items.filter((i) => i.kind === 'cellBox').length, 4, 'a plain 2x2 table still draws four cells');
+}
+
+{
+  // A rowspan reaching past the last row must be clamped, not run away.
+  const measure = (t, st) => t.length * st.size * 0.5;
+  const wild = layout(
+    [{ kind: 'table', rows: [[{ runs: [{ text: 'x' }], span: 1, rowSpan: 99 }]] }],
+    { geometry: A4, scale: DEFAULT_SCALE, measure },
+  );
+  ok(wild.length >= 1, 'a rowspan larger than the table still lays out');
+  const box = wild[0].items.find((i) => i.kind === 'cellBox');
+  ok(box.height < A4.height, 'and its box stays within the page');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
