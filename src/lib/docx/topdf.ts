@@ -25,11 +25,12 @@ import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
 import { loadFonts, browserFontSource, needsFromFlags, type FontSource, type StyleKey } from './fonts.ts';
 import { LATIN, RTL_SCRIPTS, scriptFont, scriptsIn } from './scripts.ts';
 import { applyRunSpans, hexToUnitRgb, readTableCellRuns } from './runs.ts';
+import { readFurnitureRefs, parseFurniture, type FurnitureRefs } from './furniture.ts';
 import {
   readParagraphProps, readPageSetup, correlate, readImageExtents, intrinsicSize, readStyles,
   type PageSetup,
 } from './wordxml.ts';
-import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
+import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type Drawn, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
 
 let cachedMammoth: Promise<typeof import('mammoth')> | null = null;
 /** ~200 kB, so never at import time. */
@@ -72,6 +73,10 @@ export interface ConvertResult {
   runsStyled: number;
   /** Table cells whose runs were split the same way. */
   cellsStyled: number;
+  /** True when a header was found and drawn on every page. */
+  header: boolean;
+  /** True when a footer was found and drawn on every page. */
+  footer: boolean;
   /** Paragraphs where the text did not line up, so defaults were kept. */
   unstyled: number;
   /** Page setup taken from the document, when it had any. */
@@ -175,11 +180,24 @@ export async function docxToPdf(
   let runsStyled = 0;
   let cellsStyled = 0;
   let pageSetup: PageSetup | null = null;
+  let furniture: {
+    refs: FurnitureRefs;
+    headerXml?: string;
+    footerXml?: string;
+    headerFirstXml?: string;
+    footerFirstXml?: string;
+  } | null = null;
 
   try {
     const { unzipSync, strFromU8 } = await import('fflate');
     const entries = unzipSync(input.slice(), {
-      filter: (f) => f.name === 'word/document.xml' || f.name === 'word/styles.xml',
+      // Headers and footers live in their own parts, reached through a
+      // relationship id, so the rels part has to come along too.
+      filter: (f) =>
+        f.name === 'word/document.xml' ||
+        f.name === 'word/styles.xml' ||
+        f.name === 'word/_rels/document.xml.rels' ||
+        /^word\/(?:header|footer)\d*\.xml$/.test(f.name),
     });
     const documentXml = entries['word/document.xml'] ? strFromU8(entries['word/document.xml']) : '';
     // Styles carry heading sizes and the spacing most templates set once on a
@@ -203,6 +221,20 @@ export async function docxToPdf(
       }
 
       pageSetup = readPageSetup(documentXml);
+
+      const relsPart = entries['word/_rels/document.xml.rels'];
+      if (relsPart) {
+        const refs = readFurnitureRefs(documentXml, strFromU8(relsPart));
+        const partText = (name: string | undefined) =>
+          name && entries[name] ? strFromU8(entries[name]) : undefined;
+        furniture = {
+          refs,
+          headerXml: partText(refs.header),
+          footerXml: partText(refs.footer),
+          headerFirstXml: partText(refs.headerFirst),
+          footerFirstXml: partText(refs.footerFirst),
+        };
+      }
       const props = readParagraphProps(documentXml, styles);
       const matched = correlate(blocks, props);
       styled = matched.applied;
@@ -371,8 +403,90 @@ export async function docxToPdf(
     // Keep whatever the scale already had.
   }
 
+  /**
+   * Lays out one header or footer and moves it into its band.
+   *
+   * The band is laid out on a deliberately tall page so it never paginates,
+   * then translated: a header hangs from the top edge, a footer sits on the
+   * bottom one. Reusing layout() rather than hand-drawing means the furniture
+   * gets the same alignment, tab stops, colours and links as body text.
+   */
+  const bandItems = (
+    xml: string,
+    place: 'header' | 'footer',
+    page: number,
+    total: number,
+  ): Drawn[] => {
+    if (!furniture) return [];
+    const parts = parseFurniture(xml, page, total);
+    if (!parts.length) return [];
+
+    const look = new Map(parts.map((part) => [part.block, part]));
+    const laidBand = layout(
+      parts.map((part) => part.block),
+      {
+        geometry: { width: pageBox.width, height: 10_000, margin: pageBox.margin },
+        scale: { ...scale, singleLine },
+        measure,
+        appearance: (block) => {
+          const part = look.get(block);
+          if (!part) return undefined;
+          // No paragraph spacing inside a band: the distance from the page edge
+          // is what positions it, and spacing would fight that.
+          return { align: part.align, tabs: part.tabs, spaceBefore: 0, spaceAfter: 0 };
+        },
+      },
+    );
+
+    const items = laidBand[0]?.items ?? [];
+    if (!items.length) return [];
+
+    const ys = items.map((item) => item.y);
+    const delta =
+      place === 'header'
+        ? pageBox.height - furniture.refs.headerDistance - scale.body - Math.max(...ys)
+        : furniture.refs.footerDistance - Math.min(...ys);
+
+    return items.map((item) => ({ ...item, y: item.y + delta }));
+  };
+
+  /** Which part applies to a page, honouring "different first page". */
+  const partsFor = (index: number) => {
+    if (!furniture) return { header: undefined, footer: undefined };
+    const first = index === 0 && furniture.refs.titlePg;
+    return {
+      header: first ? (furniture.headerFirstXml ?? furniture.headerXml) : furniture.headerXml,
+      footer: first ? (furniture.footerFirstXml ?? furniture.footerXml) : furniture.footerXml,
+    };
+  };
+
+  // The bands' heights do not depend on the page numbers — only their widths do
+  // — so measuring once with placeholder numbers is enough to reserve space.
+  let insetTop = 0;
+  let insetBottom = 0;
+  if (furniture) {
+    for (const xml of [furniture.headerXml, furniture.headerFirstXml]) {
+      if (!xml) continue;
+      const band = bandItems(xml, 'header', 1, 1);
+      if (!band.length) continue;
+      const lowest = Math.min(...band.map((item) => item.y));
+      insetTop = Math.max(insetTop, (pageBox.height - pageBox.margin) - (lowest - 6));
+    }
+    for (const xml of [furniture.footerXml, furniture.footerFirstXml]) {
+      if (!xml) continue;
+      const band = bandItems(xml, 'footer', 1, 1);
+      if (!band.length) continue;
+      const highest = Math.max(...band.map((item) => item.y));
+      insetBottom = Math.max(insetBottom, highest + scale.body + 6 - pageBox.margin);
+    }
+    insetTop = Math.max(0, insetTop);
+    insetBottom = Math.max(0, insetBottom);
+  }
+
   const laid: LaidOutPage[] = layout(blocks, {
     geometry: pageBox,
+    insetTop,
+    insetBottom,
     scale: { ...scale, singleLine },
     measure,
     maxImageWidth: pageBox.width - pageBox.margin * 2,
@@ -387,6 +501,29 @@ export async function docxToPdf(
   let links = 0;
   const ink = rgb(0.09, 0.09, 0.11);
   const linkInk = rgb(0.05, 0.32, 0.55);
+
+  // Now the page count is known, so the numbers can be real.
+  let drewHeader = false;
+  let drewFooter = false;
+  if (furniture) {
+    for (const [index, page] of laid.entries()) {
+      const which = partsFor(index);
+      if (which.header) {
+        const band = bandItems(which.header, 'header', index + 1, laid.length);
+        if (band.length) {
+          page.items.unshift(...band);
+          drewHeader = true;
+        }
+      }
+      if (which.footer) {
+        const band = bandItems(which.footer, 'footer', index + 1, laid.length);
+        if (band.length) {
+          page.items.unshift(...band);
+          drewFooter = true;
+        }
+      }
+    }
+  }
 
   for (const page of laid) {
     const sheet = pdf.addPage([pageBox.width, pageBox.height]);
@@ -521,6 +658,8 @@ export async function docxToPdf(
     unstyled,
     runsStyled,
     cellsStyled,
+    header: drewHeader,
+    footer: drewFooter,
     pageSetup,
     metricFonts: loaded !== null,
     scripts: [...scripts].filter((k) => !(loaded?.missing ?? []).includes(k)),
@@ -597,7 +736,8 @@ export function describeConversion(result: ConvertResult): string {
 
 export const LAYOUT_CAVEATS = [
   'Table cells take their run colours, highlighting and sizes, but not paragraph alignment, indents or spacing; a nested table gets neither',
-  'Headers, footers, page numbers and footnotes are not carried over',
+  'Footnotes and endnotes are not carried over',
+  'Headers and footers carry text, page numbers and a different first page, but not images, tables or even/odd variants',
   'A page break in the middle of a paragraph is not reproduced; one before a paragraph, or on its own, is',
   'Text boxes and shapes are not reproduced',
   'Columns are equal width and are not balanced on the last page; a document that changes column count part-way uses its first section throughout',

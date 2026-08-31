@@ -121,6 +121,13 @@ export interface LayoutOptions {
   /** Gutter between those columns, in points. */
   columnGap?: number;
   /**
+   * Extra space to keep clear at the top and bottom of every page, on top of
+   * the margin. This is how a header and footer reserve their band without the
+   * body flowing underneath them.
+   */
+  insetTop?: number;
+  insetBottom?: number;
+  /**
    * Appearance read from word/document.xml, keyed by block. Absent entries
    * simply fall back to the defaults, so a correlation miss is harmless.
    */
@@ -437,8 +444,12 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
   const columnGap = Math.max(0, options.columnGap ?? 0);
   const fullWidth = geometry.width - geometry.margin * 2;
   const textWidth = (fullWidth - columnGap * (columnCount - 1)) / columnCount;
-  const bottom = geometry.margin;
-  const top = geometry.height - geometry.margin;
+  // Header and footer bands sit inside the margin, so the body has to start
+  // lower and stop higher or it would print straight over them.
+  const insetTop = Math.max(0, options.insetTop ?? 0);
+  const insetBottom = Math.max(0, options.insetBottom ?? 0);
+  const bottom = geometry.margin + insetBottom;
+  const top = geometry.height - geometry.margin - insetTop;
 
   const pages: LaidOutPage[] = [];
   let items: Drawn[] = [];

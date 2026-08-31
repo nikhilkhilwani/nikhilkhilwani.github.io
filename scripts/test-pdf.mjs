@@ -854,7 +854,7 @@ const plain = await makePlain();
       const content = await (await doc.getPage(n)).getTextContent();
       for (const it of content.items) {
         if (!it.str.trim()) continue;
-        out.push({ page: n, str: it.str, size: it.height, x: it.transform[4] });
+        out.push({ page: n, str: it.str, size: it.height, x: it.transform[4], y: it.transform[5] });
       }
     }
     return out;
@@ -1137,6 +1137,190 @@ const plain = await makePlain();
   const missingCol = [];
   for (let i = 1; i <= 24; i++) if (!colText.includes(`Paragraph ${i} `)) missingCol.push(i);
   eq(missingCol.length, 0, `word: every paragraph survives the column flow${missingCol.length ? ` (missing ${missingCol.slice(0, 4)})` : ''}`);
+
+  /* --- headers, footers and page numbers --- */
+
+  const NSW =
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"';
+
+  /** A package with a rels part plus whatever header/footer parts are given. */
+  const withParts = (docBody, parts) =>
+    zipSync({
+      '[Content_Types].xml': strToU8(
+        '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+          '<Default Extension="xml" ContentType="application/xml"/>' +
+          '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+      ),
+      '_rels/.rels': strToU8(
+        '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+      ),
+      'word/_rels/document.xml.rels': strToU8(
+        '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+          Object.keys(parts)
+            .map((name) => `<Relationship Id="rid_${name}" Type="x/${name}" Target="${name}.xml"/>`)
+            .join('') +
+          '</Relationships>',
+      ),
+      ...Object.fromEntries(
+        Object.entries(parts).map(([name, xml]) => [`word/${name}.xml`, strToU8(`<?xml version="1.0"?>${xml}`)]),
+      ),
+      'word/document.xml': strToU8(`<?xml version="1.0"?><w:document ${NSW}><w:body>${docBody}</w:body></w:document>`),
+    });
+
+  const longBody = Array.from({ length: 55 }, (_, i) =>
+    p(`Body paragraph ${i + 1} with enough words to push this document over several pages.`),
+  ).join('');
+
+  const sectWith = (refs) =>
+    '<w:sectPr>' + refs +
+    '<w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1134" w:bottom="1134" w:left="1134" w:right="1134" w:header="567" w:footer="567"/>' +
+    '</w:sectPr>';
+
+  const HEADER =
+    `<w:hdr ${NSW}><w:p>` +
+    '<w:pPr><w:tabs><w:tab w:val="right" w:pos="9070"/></w:tabs></w:pPr>' +
+    '<w:r><w:rPr><w:b/></w:rPr><w:t>RUNNINGHEAD</w:t></w:r>' +
+    '<w:r><w:tab/></w:r><w:r><w:t>RIGHTBIT</w:t></w:r></w:p></w:hdr>';
+
+  const FOOTER =
+    `<w:ftr ${NSW}><w:p><w:pPr><w:jc w:val="center"/></w:pPr>` +
+    '<w:r><w:t xml:space="preserve">Page </w:t></w:r>' +
+    '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>' +
+    '<w:r><w:t xml:space="preserve"> of </w:t></w:r>' +
+    '<w:r><w:fldChar w:fldCharType="begin"/><w:instrText> NUMPAGES </w:instrText>' +
+    '<w:fldChar w:fldCharType="separate"/><w:t>1</w:t><w:fldChar w:fldCharType="end"/></w:r>' +
+    '</w:p></w:ftr>';
+
+  const furnished = await docxToPdf(
+    withParts(
+      longBody +
+        sectWith('<w:headerReference r:id="rid_header1" w:type="default"/><w:footerReference r:id="rid_footer1" w:type="default"/>'),
+      { header1: HEADER, footer1: FOOTER },
+    ),
+  );
+
+  eq(furnished.header, true, 'word: a header was found and drawn');
+  eq(furnished.footer, true, 'word: a footer was found and drawn');
+  ok(furnished.pages >= 2, `word: the furnished document runs to ${furnished.pages} pages`);
+
+  const fItems = await itemsOf(furnished.bytes);
+
+  // The header must repeat, and its page number must be right on every page.
+  for (let n = 1; n <= furnished.pages; n++) {
+    const onPage = fItems.filter((i) => i.page === n);
+    ok(
+      onPage.some((i) => i.str.includes('RUNNINGHEAD')),
+      `word: the header repeats on page ${n}`,
+    );
+    ok(
+      onPage.some((i) => i.str.includes('RIGHTBIT')),
+      `word: its right-tabbed part is on page ${n} too`,
+    );
+    const joinedPage = onPage.map((i) => i.str).join('');
+    ok(
+      joinedPage.includes(`Page ${n} of ${furnished.pages}`),
+      `word: page ${n} footer reads "Page ${n} of ${furnished.pages}"`,
+    );
+  }
+  // The stale cached values must never appear.
+  ok(!fItems.some((i) => i.str.includes('Page 1 of 1')), 'word: no cached "Page 1 of 1" leaked through');
+
+  // The body must sit strictly between the bands, not over them.
+  const page1 = fItems.filter((i) => i.page === 1);
+  const headY = page1.find((i) => i.str.includes('RUNNINGHEAD')).y;
+  const footY = page1.find((i) => i.str.includes('Page 1')).y;
+  const bodyYs = page1.filter((i) => i.str.includes('Body paragraph')).map((i) => i.y);
+  ok(bodyYs.length > 0, 'word: page 1 carries body text');
+  ok(Math.max(...bodyYs) < headY, `word: the body starts below the header (${Math.max(...bodyYs).toFixed(0)} < ${headY.toFixed(0)})`);
+  ok(Math.min(...bodyYs) > footY, `word: and stops above the footer (${Math.min(...bodyYs).toFixed(0)} > ${footY.toFixed(0)})`);
+
+  /* the same document with margins too tight to clear the bands */
+
+  // The case above has a 56.7pt top margin, which already sits below a 39.35pt
+  // header — so the body never had to move and the overlap check passed for
+  // free. This one squeezes the margins so the header and footer genuinely
+  // intrude on the text area, which is what the insets exist for.
+  const tightSect =
+    '<w:sectPr>' +
+    '<w:headerReference r:id="rid_header1" w:type="default"/>' +
+    '<w:footerReference r:id="rid_footer1" w:type="default"/>' +
+    '<w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="284" w:bottom="284" w:left="1134" w:right="1134" w:header="283" w:footer="283"/>' +
+    '</w:sectPr>';
+
+  // Three lines deep, so the band reaches past where the body would otherwise
+  // start. With a single-line header the body's own spaceBefore already clears
+  // it and the check below would pass whether the insets worked or not.
+  const TALL_HEADER =
+    `<w:hdr ${NSW}>` +
+    '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>RUNNINGHEAD</w:t></w:r></w:p>' +
+    '<w:p><w:r><w:t>HEADLINETWO</w:t></w:r></w:p>' +
+    '<w:p><w:r><w:t>RIGHTBIT</w:t></w:r></w:p>' +
+    '</w:hdr>';
+  const TALL_FOOTER =
+    `<w:ftr ${NSW}>` +
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr>' +
+    '<w:r><w:t xml:space="preserve">Page </w:t></w:r>' +
+    '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>' +
+    '</w:p>' +
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>FOOTLINETWO</w:t></w:r></w:p>' +
+    '<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:t>FOOTLINETHREE</w:t></w:r></w:p>' +
+    '</w:ftr>';
+
+  const tight = await docxToPdf(
+    withParts(longBody + tightSect, { header1: TALL_HEADER, footer1: TALL_FOOTER }),
+  );
+  eq(tight.header, true, 'word: the tight-margin document still finds its header');
+  const tItems2 = await itemsOf(tight.bytes);
+  const tPage1 = tItems2.filter((i) => i.page === 1);
+  // The band's INNERMOST line is what the body has to clear, not its outermost.
+  const tHead = tPage1.find((i) => i.str.includes('RIGHTBIT'));
+  const tFoot = tPage1.find((i) => i.str.includes('Page 1'));
+  const tBody = tPage1.filter((i) => i.str.includes('Body paragraph')).map((i) => i.y);
+  ok(tHead !== undefined && tFoot !== undefined, 'word: tight margins still draw both bands');
+  ok(tBody.length > 0, 'word: and still draw body text');
+  ok(
+    Math.max(...tBody) < tHead.y,
+    `word: with tight margins the body is still pushed below the header (${Math.max(...tBody).toFixed(0)} < ${tHead.y.toFixed(0)})`,
+  );
+  ok(
+    Math.min(...tBody) > tFoot.y,
+    `word: and lifted above the footer (${Math.min(...tBody).toFixed(0)} > ${tFoot.y.toFixed(0)})`,
+  );
+
+  // Reserving the bands must cost page area, not overlap.
+  const bare = await docxToPdf(withParts(longBody + sectWith(''), {}));
+  eq(bare.header, false, 'word: a document with no header reports none');
+  eq(bare.footer, false, 'word: and no footer');
+  ok(
+    furnished.pages >= bare.pages,
+    `word: reserving the bands never yields more room (${furnished.pages} vs ${bare.pages})`,
+  );
+
+  /* different first page */
+
+  const FIRST = `<w:hdr ${NSW}><w:p><w:r><w:t>TITLEPAGEHEAD</w:t></w:r></w:p></w:hdr>`;
+  const titled = await docxToPdf(
+    withParts(
+      longBody +
+        sectWith(
+          '<w:titlePg/>' +
+            '<w:headerReference r:id="rid_header1" w:type="default"/>' +
+            '<w:headerReference r:id="rid_header2" w:type="first"/>',
+        ),
+      { header1: HEADER, header2: FIRST },
+    ),
+  );
+  const tItems = await itemsOf(titled.bytes);
+  const firstPage = tItems.filter((i) => i.page === 1).map((i) => i.str).join('');
+  const laterPage = tItems.filter((i) => i.page === 2).map((i) => i.str).join('');
+  ok(firstPage.includes('TITLEPAGEHEAD'), 'word: page 1 uses the first-page header');
+  ok(!firstPage.includes('RUNNINGHEAD'), 'word: and not the default one');
+  ok(laterPage.includes('RUNNINGHEAD'), 'word: page 2 uses the default header');
+  ok(!laterPage.includes('TITLEPAGEHEAD'), 'word: and not the first-page one');
 }
 
 

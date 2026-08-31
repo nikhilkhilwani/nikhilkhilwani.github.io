@@ -39,6 +39,9 @@ import {
   readRunSpans, applyRunSpans, alignOffsets, hexToUnitRgb, readTableCellRuns,
 } from '../src/lib/docx/runs.ts';
 import {
+  readRelationships, readFurnitureRefs, substituteFields, parseFurniture,
+} from '../src/lib/docx/furniture.ts';
+import {
   twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables, readStyles,
 } from '../src/lib/docx/wordxml.ts';
 
@@ -1951,6 +1954,158 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
     JSON.stringify(before),
     'columns:1 is byte-for-byte identical to omitting the option',
   );
+}
+
+
+/* ------------------------------------------- headers, footers, page numbers */
+
+// These live in their own parts, reached through a relationship id. mammoth
+// converts only document.xml, so headers vanished entirely.
+
+{
+  const rels =
+    '<Relationships>' +
+    '<Relationship Id="rId4" Type="x/header" Target="header1.xml"/>' +
+    '<Relationship Id="rId5" Type="x/footer" Target="./footer2.xml"/>' +
+    '<Relationship Id="rId6" Type="x/header" Target="/word/header3.xml"/>' +
+    '<Relationship Id="bad" Type="x/other"/>' +
+    '</Relationships>';
+  const map = readRelationships(rels);
+  eq(map.get('rId4'), 'word/header1.xml', 'a plain target is resolved under word/');
+  eq(map.get('rId5'), 'word/footer2.xml', 'a leading ./ is stripped');
+  eq(map.get('rId6'), 'word/header3.xml', 'an absolute /word/ target is normalised');
+  eq(map.has('bad'), false, 'a relationship with no target is skipped');
+  eq(readRelationships('<Relationships/>').size, 0, 'an empty rels part yields nothing');
+}
+
+{
+  const rels =
+    '<Relationships>' +
+    '<Relationship Id="h1" Target="header1.xml"/>' +
+    '<Relationship Id="h2" Target="header2.xml"/>' +
+    '<Relationship Id="f1" Target="footer1.xml"/>' +
+    '</Relationships>';
+  const doc = (sect) => `<w:document><w:body><w:sectPr>${sect}</w:sectPr></w:body></w:document>`;
+
+  const full = readFurnitureRefs(
+    doc(
+      '<w:headerReference r:id="h1" w:type="default"/>' +
+        '<w:headerReference r:id="h2" w:type="first"/>' +
+        '<w:footerReference r:id="f1" w:type="default"/>' +
+        '<w:titlePg/><w:pgMar w:header="720" w:footer="576"/>',
+    ),
+    rels,
+  );
+  eq(full.header, 'word/header1.xml', 'the default header is resolved');
+  eq(full.headerFirst, 'word/header2.xml', 'and the first-page header');
+  eq(full.footer, 'word/footer1.xml', 'and the footer');
+  eq(full.footerFirst, undefined, 'a first-page footer that was not declared stays absent');
+  eq(full.titlePg, true, 'w:titlePg is honoured');
+  ok(Math.abs(full.headerDistance - 36) < 0.01, '720tw header distance is 36pt');
+  ok(Math.abs(full.footerDistance - 28.8) < 0.01, '576tw footer distance is 28.8pt');
+
+  const bare = readFurnitureRefs(doc('<w:pgMar w:top="1134"/>'), rels);
+  eq(bare.header, undefined, 'a section with no reference has no header');
+  eq(bare.titlePg, false, 'and no title page');
+  ok(bare.headerDistance > 0, 'the distances still get a sane default');
+
+  const off = readFurnitureRefs(doc('<w:titlePg w:val="0"/>'), rels);
+  eq(off.titlePg, false, 'w:titlePg val=0 turns it off');
+
+  // "even" only applies with evenAndOddHeaders; using it blindly would put it
+  // on every other page.
+  const even = readFurnitureRefs(doc('<w:headerReference r:id="h1" w:type="even"/>'), rels);
+  eq(even.header, undefined, 'an even-page header is ignored rather than misapplied');
+}
+
+{
+  // Both field spellings, and the cached value must be dropped: it is whatever
+  // the number happened to be when Word last saved.
+  const simple = substituteFields('<w:fldSimple w:instr=" PAGE "><w:r><w:t>99</w:t></w:r></w:fldSimple>', 3, 12);
+  ok(simple.includes('>3<'), 'fldSimple PAGE becomes the real page number');
+  ok(!simple.includes('99'), 'and the cached 99 is gone');
+
+  const total = substituteFields('<w:fldSimple w:instr=" NUMPAGES "><w:r><w:t>77</w:t></w:r></w:fldSimple>', 3, 12);
+  ok(total.includes('>12<'), 'NUMPAGES becomes the page count');
+  ok(!total.includes('77'), 'and its cached value is gone');
+
+  const selfClosing = substituteFields('<w:fldSimple w:instr=" PAGE "/>', 5, 9);
+  ok(selfClosing.includes('>5<'), 'a self-closing fldSimple works too');
+
+  const chars = substituteFields(
+    '<w:r><w:fldChar w:fldCharType="begin"/><w:instrText> PAGE </w:instrText>' +
+      '<w:fldChar w:fldCharType="separate"/><w:t>42</w:t><w:fldChar w:fldCharType="end"/></w:r>',
+    7,
+    9,
+  );
+  ok(chars.includes('>7<'), 'the begin/instrText/end run form works');
+  ok(!chars.includes('42'), 'and drops the cached value');
+
+  // Anything that is not a page field must be left exactly as it was.
+  const other = '<w:fldSimple w:instr=" TOC \\o &quot;1-3&quot; "><w:r><w:t>Contents</w:t></w:r></w:fldSimple>';
+  eq(substituteFields(other, 1, 1), other, 'a TOC field is left untouched');
+  eq(substituteFields('<w:p><w:r><w:t>plain</w:t></w:r></w:p>', 1, 1), '<w:p><w:r><w:t>plain</w:t></w:r></w:p>', 'text with no fields is unchanged');
+}
+
+{
+  const hdr =
+    '<w:hdr><w:p>' +
+    '<w:pPr><w:jc w:val="center"/><w:tabs><w:tab w:val="right" w:pos="9000"/><w:tab w:val="center" w:pos="4500"/></w:tabs></w:pPr>' +
+    '<w:r><w:rPr><w:b/><w:i/><w:color w:val="1b2a49"/><w:sz w:val="18"/></w:rPr><w:t>Name</w:t></w:r>' +
+    '<w:r><w:tab/></w:r>' +
+    '<w:r><w:t xml:space="preserve">Page </w:t></w:r>' +
+    '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>' +
+    '</w:p><w:p/><w:p><w:r><w:t>second line</w:t></w:r></w:p></w:hdr>';
+
+  const parts = parseFurniture(hdr, 4, 10);
+  eq(parts.length, 2, 'an empty paragraph is skipped');
+
+  const first = parts[0];
+  eq(first.align, 'center', 'alignment is read');
+  eq(first.tabs.length, 2, 'both tab stops are read');
+  ok(first.tabs[0].pos < first.tabs[1].pos, 'and sorted by position');
+  eq(first.tabs[0].align, 'center', 'the nearer stop is the centre one');
+
+  const runs = first.block.runs;
+  eq(runs.map((r) => r.text).join(''), 'Name\tPage 4', 'the page number is substituted inline');
+  eq(runs[0].bold, true, 'bold is read');
+  eq(runs[0].italic, true, 'italic is read');
+  eq(runs[0].color, '1B2A49', 'colour is read and upper-cased');
+  eq(runs[0].size, 9, 'size is read in points');
+  eq(parts[1].block.runs[0].text, 'second line', 'a second paragraph is kept');
+
+  eq(parseFurniture('<w:hdr/>', 1, 1).length, 0, 'an empty header yields no blocks');
+}
+
+{
+  // The insets are what stop the body printing over the bands.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const many = Array.from({ length: 40 }, (_, i) => ({
+    kind: 'paragraph',
+    runs: [{ text: `Paragraph ${i + 1} with a reasonable number of words in it.` }],
+  }));
+
+  const plain = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure });
+  const inset = layout(many, {
+    geometry: A4, scale: DEFAULT_SCALE, measure, insetTop: 60, insetBottom: 60,
+  });
+
+  const topOf = (pages) => Math.max(...pages[0].items.filter((i) => i.kind === 'line').map((i) => i.y));
+  const bottomOf = (pages) => Math.min(...pages[0].items.filter((i) => i.kind === 'line').map((i) => i.y));
+
+  ok(topOf(inset) < topOf(plain) - 50, `insetTop pushes the first line down (${topOf(inset).toFixed(0)} vs ${topOf(plain).toFixed(0)})`);
+  ok(bottomOf(inset) > bottomOf(plain), 'insetBottom lifts the last line off the page bottom');
+  // More direct than page count, which only changes once the content crosses
+  // a boundary: a shorter text area holds fewer lines per page.
+  const linesOnFirst = (pages) => pages[0].items.filter((i) => i.kind === 'line').length;
+  ok(
+    linesOnFirst(inset) < linesOnFirst(plain),
+    `fewer lines fit on a page with the bands reserved (${linesOnFirst(inset)} vs ${linesOnFirst(plain)})`,
+  );
+  ok(inset.length >= plain.length, 'and never fewer pages than without them');
+
+  const zero = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure, insetTop: 0, insetBottom: 0 });
+  eq(JSON.stringify(zero), JSON.stringify(plain), 'zero insets are identical to omitting them');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
