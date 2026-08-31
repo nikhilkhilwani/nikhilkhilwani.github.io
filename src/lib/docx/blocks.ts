@@ -28,6 +28,12 @@ export interface Run {
   script?: 'super' | 'sub';
   /** Destination for a hyperlink run. */
   href?: string;
+  /** Six hex digits, from w:color. Attached later by runs.ts. */
+  color?: string;
+  /** Six hex digits, from w:highlight or w:shd. */
+  highlight?: string;
+  /** Points, from a run's own w:sz. Overrides the paragraph size. */
+  size?: number;
 }
 
 export interface Cell {
@@ -123,7 +129,10 @@ const sameStyle = (a: Run, b: Run): boolean =>
   !!a.underline === !!b.underline &&
   !!a.strike === !!b.strike &&
   a.script === b.script &&
-  a.href === b.href;
+  a.href === b.href &&
+  a.color === b.color &&
+  a.highlight === b.highlight &&
+  a.size === b.size;
 
 /**
  * Merges adjacent runs with identical styling and drops empty ones.

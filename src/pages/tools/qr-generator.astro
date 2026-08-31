@@ -160,7 +160,7 @@ const MODES = [
 
         <div class="field">
           <label for="qr-dark">Foreground</label>
-          <input id="qr-dark" type="color" value="#07080c" />
+          <input id="qr-dark" type="color" value="#0f141b" />
         </div>
 
         <div class="field">
@@ -205,7 +205,7 @@ const MODES = [
   .tabs__tab[aria-selected='true'] {
     color: var(--accent);
     border-color: var(--accent);
-    background: rgba(110, 231, 215, 0.07);
+    background: rgb(var(--accent-rgb) / 0.07);
   }
 
   .qr__panel { display: grid; gap: 0.85rem; }

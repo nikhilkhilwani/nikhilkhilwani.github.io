@@ -984,6 +984,116 @@ const plain = await makePlain();
     Math.abs(at('MERGEDCELL').x - at('THIRDA').x) < 1,
     'word: the merged cell itself is in column 1',
   );
+
+  /* --- run-level colour, highlighting and per-run sizes --- */
+
+  // pdf.js reports every fill-colour operator as a hex string, so what actually
+  // reached the page can be asserted rather than inferred from our own state.
+  const fillsOf = async (bytes) => {
+    const doc = await pdfjs.getDocument({ data: new Uint8Array(bytes), isEvalSupported: false }).promise;
+    const found = new Set();
+    for (let n = 1; n <= doc.numPages; n++) {
+      const ops = await (await doc.getPage(n)).getOperatorList();
+      for (let i = 0; i < ops.fnArray.length; i++) {
+        if (ops.fnArray[i] === pdfjs.OPS.setFillRGBColor) found.add(String(ops.argsArray[i][0]).toLowerCase());
+      }
+    }
+    return found;
+  };
+
+  const painted = await docxToPdf(
+    build(
+      '<w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t>REDTEXT</w:t></w:r>' +
+        '<w:r><w:t> plain </w:t></w:r>' +
+        '<w:r><w:rPr><w:color w:val="0000FF"/></w:rPr><w:t>BLUETEXT</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>MARKED</w:t></w:r></w:p>',
+    ),
+  );
+  eq(painted.runsStyled, 2, 'word: both paragraphs had their runs split for colour');
+
+  const fills = await fillsOf(painted.bytes);
+  ok(fills.has('#ff0000'), `word: red text reached the page (fills: ${[...fills].join(' ')})`);
+  ok(fills.has('#0000ff'), 'word: blue text reached the page');
+  ok(fills.has('#ffff00'), 'word: the yellow highlight was painted');
+  ok(fills.size >= 4, 'word: the default ink is still used for unstyled text');
+
+  // Both coloured stretches must survive as separate, readable text.
+  const paintedItems = await itemsOf(painted.bytes);
+  const joined = paintedItems.map((i) => i.str).join('');
+  ok(joined.includes('REDTEXT'), 'word: the red run keeps its text');
+  ok(joined.includes('BLUETEXT'), 'word: the blue run keeps its text');
+  ok(joined.includes('plain'), 'word: the uncoloured run between them survives');
+  ok(joined.includes('MARKED'), 'word: the highlighted run keeps its text');
+
+  // A document with no colour at all must not start emitting colour operators.
+  const plainFills = await fillsOf((await docxToPdf(build(p('just ordinary text')))).bytes);
+  ok(!plainFills.has('#ff0000'), 'word: an uncoloured document paints no stray colours');
+
+  /* per-run sizes: the caveat was that a paragraph took its first run's size */
+
+  const mixedSize = await docxToPdf(
+    build(
+      '<w:p><w:r><w:rPr><w:sz w:val="16"/></w:rPr><w:t>SMALLRUN</w:t></w:r>' +
+        '<w:r><w:rPr><w:sz w:val="48"/></w:rPr><w:t>LARGERUN</w:t></w:r></w:p>',
+    ),
+  );
+  const sizeItems = await itemsOf(mixedSize.bytes);
+  const small = sizeItems.find((i) => i.str.includes('SMALLRUN'));
+  const large = sizeItems.find((i) => i.str.includes('LARGERUN'));
+  ok(small !== undefined && large !== undefined, 'word: both runs rendered');
+  ok(Math.abs(small?.size - 8) < 1.5, `word: the 8pt run is drawn at 8pt (got ${small.size.toFixed(1)})`);
+  ok(Math.abs(large?.size - 24) < 1.5, `word: the 24pt run is drawn at 24pt (got ${large.size.toFixed(1)})`);
+  ok(large?.size > small?.size * 2, 'word: a paragraph mixing sizes no longer collapses to its first run');
+
+  /* --- colour inside table cells --- */
+
+  const cellColour = await docxToPdf(
+    build(
+      '<w:tbl>' +
+        '<w:tr><w:tc><w:p><w:r><w:rPr><w:color w:val="1B2A49"/></w:rPr><w:t>NAVYLABEL</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:rPr><w:highlight w:val="yellow"/></w:rPr><w:t>HILITECELL</w:t></w:r></w:p></w:tc></w:tr>' +
+        '<w:tr><w:tc><w:p><w:r><w:t>PLAINCELL</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:rPr><w:sz w:val="30"/></w:rPr><w:t>BIGCELL</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+    ),
+  );
+  eq(cellColour.cellsStyled, 3, 'word: the three styled cells were split, the plain one left alone');
+
+  const cellFills = await fillsOf(cellColour.bytes);
+  ok(cellFills.has('#1b2a49'), `word: a navy table label reached the page (${[...cellFills].join(' ')})`);
+  ok(cellFills.has('#ffff00'), 'word: a highlighted table cell was painted');
+
+  const cellItems = await itemsOf(cellColour.bytes);
+  const cellAt = (needle) => cellItems.find((i) => i.str.includes(needle));
+  for (const name of ['NAVYLABEL', 'HILITECELL', 'PLAINCELL', 'BIGCELL']) {
+    ok(cellAt(name) !== undefined, `word: cell "${name}" kept its text`);
+  }
+  ok(
+    Math.abs(cellAt('BIGCELL').size - 15) < 1.5,
+    `word: a cell run's own size is honoured (got ${cellAt('BIGCELL').size.toFixed(1)}pt)`,
+  );
+  ok(
+    cellAt('BIGCELL').size > cellAt('PLAINCELL').size + 2,
+    `word: and is larger than an ordinary cell (${cellAt('BIGCELL').size.toFixed(1)} vs ${cellAt('PLAINCELL').size.toFixed(1)})`,
+  );
+
+  // A vertical merge must not break the structural matching: mammoth omits the
+  // continuation cell, so a naive pairing would shift every later cell.
+  const mergedColour = await docxToPdf(
+    build(
+      '<w:tbl>' +
+        '<w:tr><w:tc><w:tcPr><w:vMerge w:val="restart"/></w:tcPr><w:p><w:r><w:t>SPANCELL</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>TOPRIGHT</w:t></w:r></w:p></w:tc></w:tr>' +
+        '<w:tr><w:tc><w:tcPr><w:vMerge/></w:tcPr><w:p/></w:tc>' +
+        '<w:tc><w:p><w:r><w:rPr><w:color w:val="FF0000"/></w:rPr><w:t>REDCELL</w:t></w:r></w:p></w:tc></w:tr></w:tbl>',
+    ),
+  );
+  eq(mergedColour.cellsStyled, 1, 'word: exactly the one coloured cell in a merged table was styled');
+  const mergedFills = await fillsOf(mergedColour.bytes);
+  ok(mergedFills.has('#ff0000'), 'word: and its colour landed, not on a neighbouring cell');
+  const mergedItems = await itemsOf(mergedColour.bytes);
+  for (const name of ['SPANCELL', 'TOPRIGHT', 'REDCELL']) {
+    ok(mergedItems.some((i) => i.str.includes(name)), `word: merged table kept "${name}"`);
+  }
 }
 
 

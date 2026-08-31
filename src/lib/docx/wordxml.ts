@@ -17,6 +17,8 @@
  */
 
 /** OOXML measures in twentieths of a point. */
+import { readRunSpans, type RunSpan } from './runs.ts';
+
 export const TWIP = 1 / 20;
 export const twips = (value: string | undefined): number =>
   value === undefined ? 0 : (Number(value) || 0) * TWIP;
@@ -59,6 +61,10 @@ export interface ParagraphProps {
   styleId?: string;
   /** This paragraph starts a new page. */
   pageBreakBefore?: boolean;
+  /** Per-run colour, highlight and size, with offsets into `runText`. */
+  runSpans?: RunSpan[];
+  /** The paragraph's raw text, which the spans index into. */
+  runText?: string;
 }
 
 export interface PageSetup {
@@ -241,6 +247,14 @@ export function readParagraphProps(
     if (sz) {
       const points = (Number(sz) || 0) / 2;
       if (points >= 4 && points <= 200) props.size = points;
+    }
+
+    // Run-level colour, highlight and size. Recorded with the raw text so the
+    // caller can align it against the block's whitespace-collapsed runs.
+    const runs = readRunSpans(paragraph);
+    if (runs.spans.length) {
+      props.runSpans = runs.spans;
+      props.runText = runs.text;
     }
 
     out.push(props);

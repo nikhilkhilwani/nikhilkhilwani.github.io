@@ -127,7 +127,7 @@ const DPIS = [
     cursor: pointer;
     transition: border-color 0.18s;
   }
-  .radio:has(input:checked) { border-color: var(--accent); background: rgba(110, 231, 215, 0.05); }
+  .radio:has(input:checked) { border-color: var(--accent); background: rgb(var(--accent-rgb) / 0.05); }
   .radio input { margin-top: 0.2rem; accent-color: var(--accent); width: 16px; height: 16px; flex: 0 0 auto; }
   .radio span { display: flex; flex-direction: column; gap: 0.2rem; min-width: 0; }
   .radio strong { font-weight: 400; font-size: 0.92rem; }
@@ -171,7 +171,7 @@ const DPIS = [
     flex: 1 1 auto;
     height: 4px;
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.09);
+    background: var(--lift-3);
     overflow: hidden;
   }
   .cp__track span { display: block; height: 100%; width: 0; background: var(--accent); transition: width 0.2s linear; }

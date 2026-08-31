@@ -1,19 +1,36 @@
 /* Design tokens — extended from the original coming-soon page so the tools
    section reads as the same site rather than a bolted-on app. */
 :root {
-  --bg: #07080c;
-  --surface: #0d1017;
-  --surface-2: #121722;
-  --ink: #f2f4f8;
-  --ink-dim: #9aa3b2;
-  --ink-faint: #5b6472;
-  --accent: #6ee7d7;
-  --accent-ink: #04231f;
-  --warn: #fbbf72;
-  --bad: #f87171;
-  --good: #6ee7a5;
+  /* Slate: a muted blue-grey base rather than near-black, with a frost-blue
+     accent. Every text pair is checked against WCAG — the weakest is
+     --ink-faint on --bg at 4.21, which clears AA for large/secondary text and
+     beats the 3.35 the previous palette ran at. */
+  --bg: #0f141b;
+  --surface: #161d26;
+  --surface-2: #202934;
+  --ink: #e9eff6;
+  --ink-dim: #9fadbe;
+  --ink-faint: #6b7a8c;
+  --accent: rgb(var(--accent-rgb));
+  --accent-ink: #08222b;
+  --warn: #ebcb8b;
+  --bad: #e88a92;
+  --good: #a3d9a5;
   --line: rgba(255, 255, 255, 0.09);
   --line-strong: rgba(255, 255, 255, 0.16);
+
+  /* Channels, not a colour: translucent washes of the accent are written
+     `rgb(var(--accent-rgb) / 0.06)`, which a plain `var(--accent)` cannot
+     express. Without this the accent has to be hardcoded at every tint site,
+     and re-theming leaves the old hue behind icon tiles and checked radios. */
+  --accent-rgb: 136 192 208;
+
+  /* The faint white washes that lift a surface off the background. Tokenised
+     for the same reason: a lighter base needs a stronger lift to stay visible,
+     and inverting them is most of the work in a light theme. */
+  --lift-1: rgba(255, 255, 255, 0.03);
+  --lift-2: rgba(255, 255, 255, 0.05);
+  --lift-3: rgba(255, 255, 255, 0.09);
 
   /* Newsreader: variable optical-size axis (6..72), so the browser adjusts the
      letterforms for display sizes on its own via font-optical-sizing. Headings
@@ -91,7 +108,7 @@ a { color: inherit; }
 
 /* ---------- surfaces ---------- */
 .panel {
-  background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.012));
+  background: linear-gradient(180deg, var(--lift-2), var(--lift-1));
   border: 1px solid var(--line);
   border-radius: var(--r);
   padding: clamp(16px, 3vw, 24px);
@@ -172,7 +189,7 @@ input[type="range"] {
   padding: 0 1.05rem;
   border-radius: 999px;
   border: 1px solid var(--line-strong);
-  background: rgba(255, 255, 255, 0.04);
+  background: var(--lift-2);
   color: var(--ink);
   cursor: pointer;
   transition: border-color 0.2s, background 0.2s, color 0.2s;

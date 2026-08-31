@@ -30,13 +30,13 @@ const Tag = soon ? 'div' : 'a';
     padding: clamp(16px, 2.4vw, 22px);
     border: 1px solid var(--line);
     border-radius: var(--r);
-    background: linear-gradient(180deg, rgba(255, 255, 255, 0.035), rgba(255, 255, 255, 0.01));
+    background: linear-gradient(180deg, var(--lift-2), var(--lift-1));
     text-decoration: none;
     color: inherit;
     transition: border-color 0.2s, transform 0.2s, background 0.2s;
   }
   a.card:hover {
-    border-color: rgba(110, 231, 215, 0.45);
+    border-color: rgb(var(--accent-rgb) / 0.45);
     transform: translateY(-2px);
   }
   @media (prefers-reduced-motion: reduce) {
@@ -51,7 +51,7 @@ const Tag = soon ? 'div' : 'a';
     border: 1px solid var(--line-strong);
     border-radius: 10px;
     color: var(--accent);
-    background: rgba(110, 231, 215, 0.05);
+    background: rgb(var(--accent-rgb) / 0.05);
   }
 
   .card__title {

@@ -36,6 +36,9 @@ import {
 } from '../src/lib/docx/scripts.ts';
 import { readImageExtents, intrinsicSize, EMU } from '../src/lib/docx/wordxml.ts';
 import {
+  readRunSpans, applyRunSpans, alignOffsets, hexToUnitRgb, readTableCellRuns,
+} from '../src/lib/docx/runs.ts';
+import {
   twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables, readStyles,
 } from '../src/lib/docx/wordxml.ts';
 
@@ -1596,6 +1599,247 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
   ok(wild.length >= 1, 'a rowspan larger than the table still lays out');
   const box = wild[0].items.find((i) => i.kind === 'cellBox');
   ok(box.height < A4.height, 'and its box stays within the page');
+}
+
+
+/* --------------------------------------------- run-level colour and size */
+
+// mammoth strips colour AND merges adjacent runs, so a red run followed by a
+// highlighted one arrives as one run with no boundary. These offsets put the
+// boundaries back, and every assertion here guards against the failure that
+// matters most: colour landing on the wrong characters.
+
+{
+  const run = (rPr, text) => `<w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t>${text}</w:t></w:r>`;
+  const para = (inner) => `<w:p>${inner}</w:p>`;
+
+  const plain = readRunSpans(para(run('', 'hello')));
+  eq(plain.text, 'hello', 'the raw text is recovered');
+  eq(plain.spans.length, 0, 'a run with no formatting contributes no span');
+
+  const coloured = readRunSpans(
+    para(run('<w:color w:val="1B2A49"/>', 'navy') + run('', 'plain')),
+  );
+  eq(coloured.text, 'navyplain', 'text from both runs concatenates');
+  eq(coloured.spans.length, 1, 'only the coloured run is recorded');
+  eq(coloured.spans[0]?.start, 0, 'the span starts at 0');
+  eq(coloured.spans[0]?.end, 4, 'and ends where the run does');
+  eq(coloured.spans[0]?.color, '1B2A49', 'the colour is upper-cased hex');
+
+  const offset = readRunSpans(para(run('', 'abc') + run('<w:color w:val="ff0000"/>', 'red')));
+  eq(offset.spans[0]?.start, 3, 'a later run gets the right start offset');
+  eq(offset.spans[0]?.end, 6, 'and the right end');
+  eq(offset.spans[0]?.color, 'FF0000', 'lower-case hex is normalised');
+
+  eq(readRunSpans(para(run('<w:color w:val="auto"/>', 'x'))).spans.length, 0, 'w:color auto is not a colour');
+  eq(readRunSpans(para(run('<w:color w:val="zzz"/>', 'x'))).spans.length, 0, 'a malformed colour is ignored');
+
+  const hi = readRunSpans(para(run('<w:highlight w:val="yellow"/>', 'marked')));
+  eq(hi.spans[0]?.highlight, 'FFFF00', 'a named highlight maps to hex');
+  eq(readRunSpans(para(run('<w:highlight w:val="none"/>', 'x'))).spans.length, 0, 'highlight "none" is not a highlight');
+
+  const shd = readRunSpans(para(run('<w:shd w:fill="00FF00"/>', 'shaded')));
+  eq(shd.spans[0]?.highlight, '00FF00', 'w:shd fill also reads as a background');
+
+  const sized = readRunSpans(para(run('<w:sz w:val="40"/>', 'big')));
+  eq(sized.spans[0]?.size, 20, 'w:sz 40 half-points is 20pt');
+  eq(readRunSpans(para(run('<w:sz w:val="2"/>', 'x'))).spans.length, 0, 'an absurd size is ignored');
+
+  // <w:pPr> holds the paragraph mark's own rPr and the tab definitions. Counting
+  // either would shift every offset in the paragraph.
+  const withPPr = readRunSpans(
+    '<w:p><w:pPr><w:rPr><w:color w:val="FF0000"/></w:rPr><w:tabs><w:tab w:pos="100"/></w:tabs></w:pPr>' +
+      run('<w:color w:val="0000FF"/>', 'body') + '</w:p>',
+  );
+  eq(withPPr.text, 'body', 'pPr contributes no text');
+  eq(withPPr.spans.length, 1, 'and no span');
+  eq(withPPr.spans[0]?.color, '0000FF', 'the body run keeps its own colour');
+  eq(withPPr.spans[0]?.start, 0, 'starting at offset 0');
+
+  // Tabs and breaks are one character each, as paragraphText also treats them.
+  const tabbed = readRunSpans(para('<w:r><w:t>a</w:t><w:tab/><w:t>b</w:t></w:r>'));
+  eq(tabbed.text, 'a\tb', 'a tab becomes one character');
+}
+
+{
+  deep(hexToUnitRgb('FF0000'), { r: 1, g: 0, b: 0 }, 'red converts');
+  deep(hexToUnitRgb('000000'), { r: 0, g: 0, b: 0 }, 'black converts');
+  const grey = hexToUnitRgb('808080');
+  ok(Math.abs(grey.r - 0.502) < 0.01, 'mid grey converts');
+  eq(hexToUnitRgb('nope'), null, 'a bad hex string yields null');
+}
+
+{
+  // tidyRuns collapses whitespace that the XML spells out in full, so offsets
+  // are aligned on non-space characters only.
+  const map = alignOffsets('a b', 'a    b');
+  ok(map !== null, 'collapsed whitespace still aligns');
+  eq(map[0], 0, 'the first character maps to offset 0');
+  eq(map[2], 5, 'the last maps past the collapsed spaces');
+
+  ok(alignOffsets('', '') !== null, 'two empty strings align');
+  ok(alignOffsets('abc', 'abc') !== null, 'identical strings align');
+  ok(alignOffsets('a\tb', 'a\tb') !== null, 'tabs align');
+
+  // The safety property: anything that is not the same text must refuse.
+  eq(alignOffsets('abc', 'abd'), null, 'different characters refuse to align');
+  eq(alignOffsets('ab', 'abc'), null, 'extra text in the XML refuses');
+  eq(alignOffsets('abc', 'ab'), null, 'extra text in the block refuses');
+}
+
+{
+  const spans = [{ start: 0, end: 3, color: 'FF0000' }, { start: 3, end: 6, highlight: 'FFFF00' }];
+
+  const split = applyRunSpans([{ text: 'abcdef' }], 'abcdef', spans);
+  ok(split !== null, 'a matching paragraph is split');
+  eq(split.length, 2, 'one merged run became two');
+  eq(split[0]?.text, 'abc', 'the first piece is the coloured stretch');
+  eq(split[0]?.color, 'FF0000', 'and carries the colour');
+  eq(split[1]?.text, 'def', 'the second is the highlighted stretch');
+  eq(split[1]?.highlight, 'FFFF00', 'and carries the highlight');
+  eq(split[0]?.highlight, undefined, 'colour and highlight do not bleed across');
+
+  // Other formatting on the original run must survive the split.
+  const styled = applyRunSpans([{ text: 'abcdef', bold: true, href: 'x' }], 'abcdef', spans);
+  ok(styled.every((r) => r.bold === true && r.href === 'x'), 'bold and href survive the split');
+
+  // A stretch with no span at all keeps no colour.
+  const partial = applyRunSpans([{ text: 'abcdef' }], 'abcdef', [{ start: 2, end: 4, color: '00FF00' }]);
+  eq(partial.length, 3, 'an interior span yields three pieces');
+  deep(partial.map((r) => r.text), ['ab', 'cd', 'ef'], 'split at the span boundaries');
+  eq(partial[1]?.color, '00FF00', 'the middle piece is coloured');
+  eq(partial[0]?.color, undefined, 'the outer pieces are not');
+
+  // Splitting must respect existing run boundaries too.
+  const across = applyRunSpans([{ text: 'abc' }, { text: 'def' }], 'abcdef', spans);
+  eq(across.length, 2, 'two runs matching two spans stay two runs');
+
+  // Refusal, not guesswork.
+  eq(applyRunSpans([{ text: 'zzz' }], 'abcdef', spans), null, 'mismatched text refuses to colour anything');
+  eq(applyRunSpans([{ text: 'abc' }], 'abc', []), null, 'no spans means nothing to do');
+}
+
+{
+  // A run declaring its own size drives the piece size and the line height, so
+  // a big run cannot overlap the line above it.
+  const measure = (text, style) => text.length * style.size * 0.5;
+
+  const mixed = wrapRuns([{ text: 'small ' }, { text: 'BIG', size: 30 }], 11, 500, measure);
+  const pieces = mixed.flatMap((l) => l.pieces);
+  const big = pieces.find((piece) => piece.text === 'BIG');
+  const small = pieces.find((piece) => piece.text === 'small');
+  eq(big?.size, 30, 'the run size reaches the piece');
+  eq(small?.size, 11, 'the other piece keeps the paragraph size');
+  eq(mixed[0]?.height, 30, 'the line is as tall as its tallest piece');
+
+  const uniform = wrapRuns([{ text: 'all the same' }], 11, 500, measure);
+  eq(uniform[0]?.height, 11, 'a line with no oversized run is just the paragraph size');
+
+  // Colour and highlight reach the pieces.
+  const painted = wrapRuns([{ text: 'red', color: 'FF0000', highlight: 'FFFF00' }], 11, 500, measure);
+  const p0 = painted[0].pieces[0];
+  eq(p0?.color, 'FF0000', 'the piece carries the colour');
+  eq(p0?.highlight, 'FFFF00', 'and the highlight');
+
+  // A larger run must push the following lines further down the page.
+  const tallDoc = layout(
+    [{ kind: 'paragraph', runs: [{ text: 'HUGE', size: 40 }] }, { kind: 'paragraph', runs: [{ text: 'after' }] }],
+    { geometry: A4, scale: DEFAULT_SCALE, measure },
+  );
+  const flatDoc = layout(
+    [{ kind: 'paragraph', runs: [{ text: 'HUGE' }] }, { kind: 'paragraph', runs: [{ text: 'after' }] }],
+    { geometry: A4, scale: DEFAULT_SCALE, measure },
+  );
+  const yOf = (pages) => pages[0].items.filter((i) => i.kind === 'line').map((i) => i.y);
+  ok(
+    yOf(tallDoc)[1] < yOf(flatDoc)[1] - 10,
+    `a 40pt run pushes the next line down (${yOf(tallDoc)[1].toFixed(1)} vs ${yOf(flatDoc)[1].toFixed(1)})`,
+  );
+}
+
+
+/* ------------------------------------------------- table cell run properties */
+
+// readParagraphProps strips tables, so cell text got no colour, highlight or
+// per-run size. Cells are matched structurally instead - by where they sit, not
+// by what they say, so two cells reading "Yes" cannot be confused.
+
+{
+  const cell = (inner, tcPr = '') => `<w:tc>${tcPr ? `<w:tcPr>${tcPr}</w:tcPr>` : ''}${inner}</w:tc>`;
+  const para = (rPr, text) => `<w:p><w:r>${rPr ? `<w:rPr>${rPr}</w:rPr>` : ''}<w:t>${text}</w:t></w:r></w:p>`;
+  const row = (...cells) => `<w:tr>${cells.join('')}</w:tr>`;
+  const tbl = (...rows) => `<w:tbl>${rows.join('')}</w:tbl>`;
+
+  eq(readTableCellRuns('<w:body/>').length, 0, 'a document with no tables yields nothing');
+
+  const simple = readTableCellRuns(
+    tbl(
+      row(cell(para('<w:color w:val="1B2A49"/>', 'Label')), cell(para('', 'Value'))),
+      row(cell(para('', 'a')), cell(para('<w:highlight w:val="yellow"/>', 'b'))),
+    ),
+  );
+  eq(simple.length, 1, 'one table');
+  eq(simple[0].length, 2, 'two rows');
+  eq(simple[0][0].length, 2, 'two cells in row 1');
+  eq(simple[0][0][0].text, 'Label', 'cell text is recovered');
+  eq(simple[0][0][0].spans[0]?.color, '1B2A49', 'and its colour');
+  eq(simple[0][0][1].spans.length, 0, 'an unstyled cell has no spans');
+  eq(simple[0][1][1].spans[0]?.highlight, 'FFFF00', 'a highlight in row 2 is found');
+
+  // A cell holding several paragraphs concatenates with no separator, exactly
+  // as blocks.ts flattens it - so the second paragraph's offsets must shift.
+  const multi = readTableCellRuns(
+    tbl(row(cell(para('', 'first') + para('<w:color w:val="FF0000"/>', 'second')))),
+  );
+  eq(multi[0][0][0].text, 'firstsecond', 'both paragraphs concatenate');
+  eq(multi[0][0][0].spans.length, 1, 'one span');
+  eq(multi[0][0][0].spans[0]?.start, 5, 'shifted past the first paragraph');
+  eq(multi[0][0][0].spans[0]?.end, 11, 'and ends at the cell text length');
+
+  // mammoth omits vMerge continuation cells, so keeping them would make every
+  // row after a merge one cell too long and the whole table would be skipped.
+  const merged = readTableCellRuns(
+    tbl(
+      row(cell(para('', 'spans'), '<w:vMerge w:val="restart"/>'), cell(para('', 'r1c2'))),
+      row(cell('<w:p/>', '<w:vMerge/>'), cell(para('<w:color w:val="00FF00"/>', 'r2c2'))),
+    ),
+  );
+  eq(merged[0][0].length, 2, 'the restart row keeps both cells');
+  eq(merged[0][1].length, 1, 'the continuation cell is skipped, matching mammoth');
+  eq(merged[0][1][0].text, 'r2c2', 'so the remaining cell is the second column');
+  eq(merged[0][1][0].spans[0]?.color, '00FF00', 'and keeps its colour');
+
+  const two = readTableCellRuns(tbl(row(cell(para('', 'x')))) + tbl(row(cell(para('', 'y')))));
+  eq(two.length, 2, 'two sibling tables are both read');
+  eq(two[1][0][0].text, 'y', 'in document order');
+}
+
+{
+  // A cell run declaring a larger size must grow its row rather than overflow.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const table = (size) => ({
+    kind: 'table',
+    rows: [[{ runs: [{ text: 'tall', ...(size ? { size } : {}) }], span: 1 }]],
+  });
+
+  const boxOf = (block) => {
+    const pages = layout([block], { geometry: A4, scale: DEFAULT_SCALE, measure });
+    return pages[0].items.find((i) => i.kind === 'cellBox');
+  };
+
+  const plain = boxOf(table(null));
+  const big = boxOf(table(40));
+  ok(
+    big.height > plain.height * 2,
+    `a 40pt run grows its row (${big.height.toFixed(1)} vs ${plain.height.toFixed(1)})`,
+  );
+
+  // The text must stay inside the box it grew.
+  const pages = layout([table(40)], { geometry: A4, scale: DEFAULT_SCALE, measure });
+  const box = pages[0].items.find((i) => i.kind === 'cellBox');
+  const line = pages[0].items.find((i) => i.kind === 'line');
+  ok(line.y >= box.y, `the baseline sits inside the cell box (${line.y.toFixed(1)} >= ${box.y.toFixed(1)})`);
+  ok(line.y <= box.y + box.height, 'and below its top edge');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

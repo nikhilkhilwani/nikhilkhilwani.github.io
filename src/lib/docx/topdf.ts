@@ -24,6 +24,7 @@
 import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
 import { loadFonts, browserFontSource, needsFromFlags, type FontSource, type StyleKey } from './fonts.ts';
 import { LATIN, RTL_SCRIPTS, scriptFont, scriptsIn } from './scripts.ts';
+import { applyRunSpans, hexToUnitRgb, readTableCellRuns } from './runs.ts';
 import {
   readParagraphProps, readPageSetup, correlate, readImageExtents, intrinsicSize, readStyles,
   type PageSetup,
@@ -67,6 +68,10 @@ export interface ConvertResult {
   links: number;
   /** Paragraphs whose Word appearance was recovered and applied. */
   styled: number;
+  /** Paragraphs whose runs were split to carry colour, highlight or size. */
+  runsStyled: number;
+  /** Table cells whose runs were split the same way. */
+  cellsStyled: number;
   /** Paragraphs where the text did not line up, so defaults were kept. */
   unstyled: number;
   /** Page setup taken from the document, when it had any. */
@@ -167,6 +172,8 @@ export async function docxToPdf(
   let appearanceFor: ((block: Block) => BlockAppearance | undefined) | undefined;
   let styled = 0;
   let unstyled = 0;
+  let runsStyled = 0;
+  let cellsStyled = 0;
   let pageSetup: PageSetup | null = null;
 
   try {
@@ -200,6 +207,47 @@ export async function docxToPdf(
       const matched = correlate(blocks, props);
       styled = matched.applied;
       unstyled = matched.skipped;
+      // Split each block's runs so colour, highlight and per-run size land on
+      // exactly the characters they cover. applyRunSpans returns null if the
+      // texts do not line up, and then the runs are left alone.
+      for (const block of blocks) {
+        if (block.kind !== 'paragraph' && block.kind !== 'heading' && block.kind !== 'listItem') {
+          continue;
+        }
+        const paragraph = matched.attach(block);
+        if (!paragraph?.runSpans || paragraph.runText === undefined) continue;
+        const split = applyRunSpans(block.runs, paragraph.runText, paragraph.runSpans);
+        if (split) {
+          block.runs = split;
+          runsStyled++;
+        }
+      }
+
+      // Table cells never entered the paragraph correlation, because
+      // readParagraphProps strips tables. They are matched structurally
+      // instead: table by table, row by row, cell by cell.
+      const xmlTables = readTableCellRuns(documentXml);
+      let nthTable = 0;
+      for (const block of blocks) {
+        if (block.kind !== 'table') continue;
+        const xmlRows = xmlTables[nthTable++];
+        // A shape mismatch means the two disagree about the table — a nested
+        // table, say — so nothing is attributed rather than guessing.
+        if (!xmlRows || xmlRows.length !== block.rows.length) continue;
+        for (let r = 0; r < block.rows.length; r++) {
+          if (xmlRows[r].length !== block.rows[r].length) continue;
+          for (let c = 0; c < block.rows[r].length; c++) {
+            const from = xmlRows[r][c];
+            if (!from.spans.length) continue;
+            const split = applyRunSpans(block.rows[r][c].runs, from.text, from.spans);
+            if (split) {
+              block.rows[r][c].runs = split;
+              cellsStyled++;
+            }
+          }
+        }
+      }
+
       appearanceFor = (block) => {
         const p = matched.attach(block);
         if (!p) return undefined;
@@ -345,13 +393,30 @@ export async function docxToPdf(
           const x = item.x + piece.x;
           const y = item.y + piece.rise;
 
+          // Highlight first, so the glyphs sit on top of it.
+          if (piece.highlight && piece.width > 0) {
+            const back = hexToUnitRgb(piece.highlight);
+            if (back) {
+              sheet.drawRectangle({
+                x,
+                y: y - piece.size * 0.24,
+                width: piece.width,
+                height: piece.size * 1.2,
+                color: rgb(back.r, back.g, back.b),
+              });
+            }
+          }
+
           if (piece.text.trim()) {
+            // A link keeps its own colour: it has to look followable, and that
+            // matters more than matching a colour the author set for prose.
+            const own = piece.color ? hexToUnitRgb(piece.color) : null;
             sheet.drawText(safe(piece.text), {
               x,
               y,
               size: piece.size,
               font: pick(piece.font, piece.bold, piece.italic),
-              color: piece.href ? linkInk : ink,
+              color: piece.href ? linkInk : own ? rgb(own.r, own.g, own.b) : ink,
             });
           }
 
@@ -450,6 +515,8 @@ export async function docxToPdf(
     links,
     styled,
     unstyled,
+    runsStyled,
+    cellsStyled,
     pageSetup,
     metricFonts: loaded !== null,
     scripts: [...scripts].filter((k) => !(loaded?.missing ?? []).includes(k)),
@@ -525,7 +592,7 @@ export function describeConversion(result: ConvertResult): string {
 }
 
 export const LAYOUT_CAVEATS = [
-  'Font colours and highlighting are not carried over, and a paragraph mixing sizes takes its first size',
+  'Table cells take their run colours, highlighting and sizes, but not paragraph alignment, indents or spacing; a nested table gets neither',
   'Headers, footers, page numbers and footnotes are not carried over',
   'A page break in the middle of a paragraph is not reproduced; one before a paragraph, or on its own, is',
   'Columns, text boxes and shapes are not reproduced',

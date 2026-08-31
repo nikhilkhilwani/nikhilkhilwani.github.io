@@ -125,7 +125,7 @@ const sections = [
     padding: 0.5em 1em;
     border: 1px solid var(--line);
     border-radius: 999px;
-    background: rgba(255, 255, 255, 0.03);
+    background: var(--lift-1);
     font-size: 0.72rem;
     letter-spacing: 0.16em;
     text-transform: uppercase;
@@ -138,9 +138,9 @@ const sections = [
     animation: pulse 2.4s ease-out infinite;
   }
   @keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgba(110, 231, 215, 0.5); }
-    70% { box-shadow: 0 0 0 11px rgba(110, 231, 215, 0); }
-    100% { box-shadow: 0 0 0 0 rgba(110, 231, 215, 0); }
+    0% { box-shadow: 0 0 0 0 rgb(var(--accent-rgb) / 0.5); }
+    70% { box-shadow: 0 0 0 11px rgb(var(--accent-rgb) / 0); }
+    100% { box-shadow: 0 0 0 0 rgb(var(--accent-rgb) / 0); }
   }
 
   h1 {

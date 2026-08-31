@@ -82,6 +82,10 @@ export interface Piece {
   strike: boolean;
   script?: 'super' | 'sub';
   href?: string;
+  /** Six hex digits for the glyphs, when the run set one. */
+  color?: string;
+  /** Six hex digits painted behind the glyphs. */
+  highlight?: string;
   size: number;
   x: number;
   /** Measured width, so the renderer can draw rules and link targets. */
@@ -184,7 +188,11 @@ export function wrapRuns(
 
   const flush = () => {
     while (pieces.length && /^ +$/.test(pieces[pieces.length - 1].text)) pieces.pop();
-    lines.push({ pieces, size, height: size });
+    // Height follows the tallest piece. Normally every piece is the paragraph
+    // size (super/subscript are smaller), so this changes nothing unless a run
+    // declared a larger size of its own.
+    const tallest = pieces.reduce((m, piece) => Math.max(m, piece.size), size);
+    lines.push({ pieces, size, height: tallest });
     pieces = [];
     x = 0;
   };
@@ -204,12 +212,24 @@ export function wrapRuns(
     text: string;
     w: number;
     run: Run;
-    style: { bold: boolean; italic: boolean; size: number; font: string };
+    // Colour and highlight ride along in `style` so the three piece-construction
+    // sites below pick them up from the same spread. measure() ignores them.
+    style: {
+      bold: boolean;
+      italic: boolean;
+      size: number;
+      font: string;
+      color?: string;
+      highlight?: string;
+    };
     rise: number;
   }[] = [];
   for (const run of runs) {
-    const scripted = run.script ? size * SCRIPT_SCALE : size;
-    const rise = run.script === 'super' ? size * 0.33 : run.script === 'sub' ? -size * 0.16 : 0;
+    // A run may declare its own size, which is how a paragraph mixing sizes
+    // stops collapsing to whatever its first run happened to be.
+    const base = run.size ?? size;
+    const scripted = run.script ? base * SCRIPT_SCALE : base;
+    const rise = run.script === 'super' ? base * 0.33 : run.script === 'sub' ? -base * 0.16 : 0;
     // Cut at script boundaries BEFORE tokenising. One piece becomes one
     // drawText call with one font, so no piece may straddle two scripts.
     // segmentByScript keeps clusters intact, so this never splits a
@@ -220,6 +240,8 @@ export function wrapRuns(
         italic: !!run.italic,
         size: scripted,
         font: segment.script,
+        color: run.color,
+        highlight: run.highlight,
       };
       for (const text of segment.text.split(/(\t|\n|[^\S\t\n]+)/).filter((t) => t.length)) {
         const w = text === '\t' || text === '\n' ? 0 : measure(text, style);
@@ -497,6 +519,12 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
 
       const widths = columnWidths(columns, textWidth);
       const cellLine = scale.body * scale.lineHeight;
+      // A cell run may declare its own size now, so a line's advance follows its
+      // tallest piece rather than the body size. Identical to cellLine for
+      // ordinary cells.
+      const advanceOf = (line: Line) => Math.max(cellLine, line.height * scale.lineHeight);
+      const heightOf = (lines: Line[]) =>
+        lines.reduce((total, line) => total + advanceOf(line), 0) + padding * 2;
 
       /* --- size the rows --- */
 
@@ -505,17 +533,14 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
         const width = spanWidth(widths, item.start, item.span, gap);
         item.lines = wrapRuns(item.cell.runs, scale.body, width - padding * 2, measure);
         if (item.rowSpan === 1) {
-          rowHeights[item.row] = Math.max(
-            rowHeights[item.row],
-            item.lines.length * cellLine + padding * 2,
-          );
+          rowHeights[item.row] = Math.max(rowHeights[item.row], heightOf(item.lines));
         }
       }
       // A spanning cell taller than the rows it covers grows the last of them,
       // which is what keeps its text inside its own box.
       for (const item of placed) {
         if (item.rowSpan === 1) continue;
-        const need = item.lines.length * cellLine + padding * 2;
+        const need = heightOf(item.lines);
         let have = 0;
         for (let rr = item.row; rr < item.row + item.rowSpan; rr++) have += rowHeights[rr];
         if (need > have) rowHeights[item.row + item.rowSpan - 1] += need - have;
@@ -557,10 +582,10 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
 
           const cellTop = top - offset[item.row];
           items.push({ kind: 'cellBox', x, y: cellTop - height, width, height });
-          let ty = cellTop - padding - scale.body;
+          let ty = cellTop - padding - Math.max(scale.body, item.lines[0]?.height ?? 0);
           for (const line of item.lines) {
             items.push({ kind: 'line', x: x + padding, y: ty, line });
-            ty -= cellLine;
+            ty -= advanceOf(line);
           }
         }
 
@@ -639,8 +664,13 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
     else y -= spaceBefore;
 
     for (const [i, line] of lines.entries()) {
-      if (!room(lineHeight) && items.length) newPage();
-      y -= size;
+      // A line holding a larger run needs proportionally more room, or it would
+      // collide with the line above it.
+      const tall = Math.max(size, line.height);
+      const advance = size > 0 ? lineHeight * (tall / size) : lineHeight;
+
+      if (!room(advance) && items.length) newPage();
+      y -= tall;
 
       if (block.kind === 'listItem' && i === 0) {
         items.push({
@@ -678,7 +708,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
         y,
         line,
       });
-      y -= lineHeight - size;
+      y -= advance - tall;
     }
 
     if (blocks[index + 1]) y -= spaceAfter;
