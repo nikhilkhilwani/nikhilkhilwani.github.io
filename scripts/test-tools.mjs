@@ -1842,5 +1842,116 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
   ok(line.y <= box.y + box.height, 'and below its top edge');
 }
 
+
+/* ------------------------------------------------------------------ columns */
+
+{
+  const sect = (cols) =>
+    '<w:document><w:body><w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1134" w:bottom="1134" w:left="1134" w:right="1134"/>' +
+    (cols ?? '') +
+    '</w:sectPr></w:body></w:document>';
+
+  const plain = readPageSetup(sect(null));
+  eq(plain.columns, 1, 'a section with no w:cols is one column');
+  eq(plain.columnGap, 0, 'and no gutter');
+
+  const two = readPageSetup(sect('<w:cols w:num="2" w:space="425"/>'));
+  eq(two.columns, 2, 'w:num=2 is two columns');
+  ok(Math.abs(two.columnGap - 21.25) < 0.01, '425tw gutter is 21.25pt');
+
+  const noSpace = readPageSetup(sect('<w:cols w:num="3"/>'));
+  eq(noSpace.columns, 3, 'three columns');
+  ok(noSpace.columnGap > 0, 'a multi-column section without w:space still gets a gutter');
+
+  const wild = readPageSetup(sect('<w:cols w:num="99"/>'));
+  eq(wild.columns, 8, 'a runaway w:num is capped rather than slicing the page up');
+
+  const junk = readPageSetup(sect('<w:cols w:num="abc"/>'));
+  eq(junk.columns, 1, 'an unparseable w:num falls back to one column');
+}
+
+{
+  const measure = (text, style) => text.length * style.size * 0.5;
+  // Enough text to overflow one column but not two.
+  const many = Array.from({ length: 22 }, (_, i) => ({
+    kind: 'paragraph',
+    runs: [{ text: `Paragraph ${i + 1} with enough words in it to occupy several lines of a narrow column.` }],
+  }));
+
+  const single = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure });
+  const twoCol = layout(many, {
+    geometry: A4, scale: DEFAULT_SCALE, measure, columns: 2, columnGap: 20,
+  });
+
+  const xsOf = (page) => [...new Set(page.items.filter((i) => i.kind === 'line').map((i) => Math.round(i.x)))];
+
+  eq(xsOf(single[0]).length, 1, 'a single-column page uses one left edge');
+  eq(xsOf(single[0])[0], A4.margin, 'which is the page margin');
+
+  const xs = xsOf(twoCol[0]).sort((a, b) => a - b);
+  eq(xs.length, 2, `a two-column page uses two left edges (got ${xs.join(', ')})`);
+  eq(xs[0], A4.margin, 'the first column starts at the margin');
+
+  const colWidth = (A4.width - A4.margin * 2 - 20) / 2;
+  ok(
+    Math.abs(xs[1] - (A4.margin + colWidth + 20)) < 1,
+    `the second column clears the first plus the gutter (${xs[1]} vs ${(A4.margin + colWidth + 20).toFixed(0)})`,
+  );
+
+  // Columns must FILL before a page is started - that is the behaviour, and
+  // it is not a page saving: a narrow column wraps roughly twice as often, so
+  // the two arrangements come out about even on area.
+  eq(xsOf(twoCol[0]).length, 2, 'page 1 is filled in both columns before a page is started');
+  ok(
+    twoCol.length <= single.length,
+    `two columns are no worse on page count (${twoCol.length} vs ${single.length})`,
+  );
+
+  // Lines must stay inside their own column.
+  for (const page of twoCol) {
+    for (const item of page.items) {
+      if (item.kind !== 'line') continue;
+      const right = item.x + Math.max(...item.line.pieces.map((pc) => pc.x + pc.width), 0);
+      ok(right <= A4.width - A4.margin + 1, 'no line spills past the right margin');
+      const inFirst = Math.abs(item.x - A4.margin) < 1;
+      const limit = inFirst ? A4.margin + colWidth + 1 : A4.width - A4.margin + 1;
+      ok(right <= limit, 'and no line crosses into the neighbouring column');
+    }
+  }
+}
+
+{
+  // Text is measured at the column width, so a two-column run wraps more often.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const one = [{ kind: 'paragraph', runs: [{ text: 'word '.repeat(60).trim() }] }];
+
+  const wide = layout(one, { geometry: A4, scale: DEFAULT_SCALE, measure });
+  const narrow = layout(one, { geometry: A4, scale: DEFAULT_SCALE, measure, columns: 2, columnGap: 20 });
+  const lineCount = (pages) => pages.reduce((n, pg) => n + pg.items.filter((i) => i.kind === 'line').length, 0);
+  ok(
+    lineCount(narrow) > lineCount(wide),
+    `the same paragraph wraps more in a column (${lineCount(narrow)} vs ${lineCount(wide)} lines)`,
+  );
+}
+
+{
+  // A single column must behave exactly as it did before columns existed.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const blocks = [
+    { kind: 'heading', level: 2, runs: [{ text: 'Head' }] },
+    { kind: 'paragraph', runs: [{ text: 'Body text that wraps a little.' }] },
+    { kind: 'table', rows: [[{ runs: [{ text: 'a' }], span: 1 }, { runs: [{ text: 'b' }], span: 1 }]] },
+    { kind: 'image', dataUri: 'data:,', width: 100, height: 50 },
+  ];
+  const before = layout(blocks, { geometry: A4, scale: DEFAULT_SCALE, measure });
+  const explicit = layout(blocks, { geometry: A4, scale: DEFAULT_SCALE, measure, columns: 1, columnGap: 0 });
+  eq(
+    JSON.stringify(explicit),
+    JSON.stringify(before),
+    'columns:1 is byte-for-byte identical to omitting the option',
+  );
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

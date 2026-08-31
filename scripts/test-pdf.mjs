@@ -1094,6 +1094,49 @@ const plain = await makePlain();
   for (const name of ['SPANCELL', 'TOPRIGHT', 'REDCELL']) {
     ok(mergedItems.some((i) => i.str.includes(name)), `word: merged table kept "${name}"`);
   }
+
+  /* --- two-column sections --- */
+
+  const filler = Array.from({ length: 24 }, (_, i) =>
+    p(`Paragraph ${i + 1} carries enough words to wrap several times inside a narrow column, which is what makes the flow visible.`),
+  ).join('');
+  const sectPr = (cols) =>
+    '<w:sectPr><w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1134" w:bottom="1134" w:left="1134" w:right="1134"/>' +
+    (cols ?? '') +
+    '</w:sectPr>';
+
+  const columned = await docxToPdf(build(filler + sectPr('<w:cols w:num="2" w:space="425"/>')));
+  const singleCol = await docxToPdf(build(filler + sectPr(null)));
+
+  eq(columned.pageSetup?.columns, 2, 'word: the section reports two columns');
+  eq(singleCol.pageSetup?.columns, 1, 'word: and one without w:cols');
+
+  const colItems = await itemsOf(columned.bytes);
+  const onPage1 = colItems.filter((i) => i.page === 1).map((i) => Math.round(i.x));
+  const distinct = [...new Set(onPage1)].sort((a, b) => a - b);
+  ok(
+    distinct.length >= 2,
+    `word: page 1 of a two-column section draws at two left edges (${distinct.join(', ')})`,
+  );
+  ok(distinct[distinct.length - 1] > distinct[0] + 100, 'word: and those edges are a column apart');
+
+  const plainItems = await itemsOf(singleCol.bytes);
+  const plainX = [...new Set(plainItems.filter((i) => i.page === 1).map((i) => Math.round(i.x)))];
+  eq(plainX.length, 1, `word: the same content in one column uses a single left edge (${plainX.join(', ')})`);
+
+  // Not a page saving: a narrow column wraps about twice as often, so the two
+  // arrangements are roughly even. What matters is that both columns are used.
+  ok(
+    columned.pages <= singleCol.pages,
+    `word: two columns are no worse on page count (${columned.pages} vs ${singleCol.pages})`,
+  );
+
+  // Nothing may be lost to the column flow.
+  const colText = colItems.map((i) => i.str).join(' ');
+  const missingCol = [];
+  for (let i = 1; i <= 24; i++) if (!colText.includes(`Paragraph ${i} `)) missingCol.push(i);
+  eq(missingCol.length, 0, `word: every paragraph survives the column flow${missingCol.length ? ` (missing ${missingCol.slice(0, 4)})` : ''}`);
 }
 
 

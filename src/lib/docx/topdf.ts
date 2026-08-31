@@ -376,6 +376,10 @@ export async function docxToPdf(
     scale: { ...scale, singleLine },
     measure,
     maxImageWidth: pageBox.width - pageBox.margin * 2,
+    // Only the document's own section can ask for columns; an explicit page
+    // size chosen in the UI keeps a single column.
+    columns: useDocumentPageSetup && pageSetup ? pageSetup.columns : 1,
+    columnGap: useDocumentPageSetup && pageSetup ? pageSetup.columnGap : 0,
     appearance: appearanceFor,
   });
 
@@ -595,7 +599,8 @@ export const LAYOUT_CAVEATS = [
   'Table cells take their run colours, highlighting and sizes, but not paragraph alignment, indents or spacing; a nested table gets neither',
   'Headers, footers, page numbers and footnotes are not carried over',
   'A page break in the middle of a paragraph is not reproduced; one before a paragraph, or on its own, is',
-  'Columns, text boxes and shapes are not reproduced',
+  'Text boxes and shapes are not reproduced',
+  'Columns are equal width and are not balanced on the last page; a document that changes column count part-way uses its first section throughout',
   'A line mixing Arabic or Hebrew with left-to-right text is laid out in logical order, not visual order',
   'Indic, Arabic, Hebrew and Thai text is drawn at a single weight — bold and italic are not synthesised for those scripts',
 ] as const;

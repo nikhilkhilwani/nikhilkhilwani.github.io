@@ -71,6 +71,10 @@ export interface PageSetup {
   width: number;
   height: number;
   margin: number;
+  /** Text columns from w:cols. 1 unless the section declares more. */
+  columns: number;
+  /** Gutter between columns, in points. */
+  columnGap: number;
 }
 
 const ALIGN: Record<string, Align> = {
@@ -288,8 +292,23 @@ export function readPageSetup(documentXml: string): PageSetup | null {
     .filter((n) => n > 0);
 
   const margin = sides.length ? Math.min(...sides) : 64;
+
+  // Columns. w:space is the gutter, in twips, and defaults to Word's 0.5cm.
+  const cols = /<w:cols\b[^>]*\/?>/.exec(sect)?.[0] ?? '';
+  const num = Number(/w:num\s*=\s*"([^"]*)"/.exec(cols)?.[1] ?? '1');
+  const space = twips(/w:space\s*=\s*"([^"]*)"/.exec(cols)?.[1]);
+  // Capped: a runaway w:num would divide the page into unreadable slivers.
+  const columns = Number.isFinite(num) && num >= 1 ? Math.min(Math.floor(num), 8) : 1;
+  const columnGap = space > 0 ? space : columns > 1 ? 14 : 0;
+
   // Never leave less than a third of the page for text.
-  return { width, height, margin: Math.min(margin, Math.min(width, height) / 3) };
+  return {
+    width,
+    height,
+    margin: Math.min(margin, Math.min(width, height) / 3),
+    columns,
+    columnGap,
+  };
 }
 
 /**

@@ -116,6 +116,10 @@ export interface LayoutOptions {
   measure: Measure;
   /** Longest edge an image may occupy, in points. */
   maxImageWidth?: number;
+  /** Text columns to flow through before starting a new page. */
+  columns?: number;
+  /** Gutter between those columns, in points. */
+  columnGap?: number;
   /**
    * Appearance read from word/document.xml, keyed by block. Absent entries
    * simply fall back to the defaults, so a correlation miss is harmless.
@@ -425,17 +429,39 @@ export const columnOffset = (widths: number[], start: number, gap = 8): number =
  */
 export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
   const { geometry, scale, measure } = options;
-  const textWidth = geometry.width - geometry.margin * 2;
+
+  // A multi-column section fills one column top to bottom, then the next, and
+  // only then starts a page. Capped at 8 so a malformed w:num cannot slice the
+  // page into unreadable slivers.
+  const columnCount = Math.max(1, Math.min(Math.floor(options.columns ?? 1), 8));
+  const columnGap = Math.max(0, options.columnGap ?? 0);
+  const fullWidth = geometry.width - geometry.margin * 2;
+  const textWidth = (fullWidth - columnGap * (columnCount - 1)) / columnCount;
   const bottom = geometry.margin;
+  const top = geometry.height - geometry.margin;
 
   const pages: LaidOutPage[] = [];
   let items: Drawn[] = [];
-  let y = geometry.height - geometry.margin;
+  let column = 0;
+  let y = top;
+  /** Left edge of the column being filled; every x is measured from this. */
+  let left = geometry.margin;
 
+  // Everything downstream calls newPage() when it runs out of room, so making
+  // it move to the next column first keeps column breaks and page breaks one
+  // concept rather than two.
   const newPage = () => {
+    if (column + 1 < columnCount) {
+      column++;
+      left = geometry.margin + column * (textWidth + columnGap);
+      y = top;
+      return;
+    }
     pages.push({ items });
     items = [];
-    y = geometry.height - geometry.margin;
+    column = 0;
+    left = geometry.margin;
+    y = top;
   };
   const room = (needed: number) => y - needed >= bottom;
 
@@ -443,7 +469,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
     if (block.kind === 'rule') {
       if (!room(14)) newPage();
       y -= 8;
-      items.push({ kind: 'rule', x: geometry.margin, y, width: textWidth });
+      items.push({ kind: 'rule', x: left, y, width: textWidth });
       y -= 6;
       continue;
     }
@@ -474,7 +500,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
 
       if (!room(height + pad * 2)) newPage();
       y -= pad;
-      items.push({ kind: 'image', x: geometry.margin, y: y - height, width, height, dataUri: block.dataUri });
+      items.push({ kind: 'image', x: left, y: y - height, width, height, dataUri: block.dataUri });
       y -= height + pad;
       continue;
     }
@@ -575,7 +601,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
 
         for (const item of placed) {
           if (item.row < r || item.row > end) continue;
-          const x = geometry.margin + columnOffset(widths, item.start, gap);
+          const x = left + columnOffset(widths, item.start, gap);
           const width = spanWidth(widths, item.start, item.span, gap);
           let height = 0;
           for (let rr = item.row; rr < item.row + item.rowSpan; rr++) height += rowHeights[rr];
@@ -675,7 +701,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
       if (block.kind === 'listItem' && i === 0) {
         items.push({
           kind: 'line',
-          x: geometry.margin + indent,
+          x: left + indent,
           y,
           line: {
             size,
@@ -704,7 +730,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
       const offset = i === 0 ? firstLine : 0;
       items.push({
         kind: 'line',
-        x: geometry.margin + indent + markerWidth + reserve + offset,
+        x: left + indent + markerWidth + reserve + offset,
         y,
         line,
       });
