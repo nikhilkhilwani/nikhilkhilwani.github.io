@@ -41,7 +41,17 @@ export type Block =
   | { kind: 'paragraph'; runs: Run[] }
   | { kind: 'listItem'; level: number; ordered: boolean; marker: string; runs: Run[] }
   | { kind: 'table'; rows: Cell[][] }
-  | { kind: 'image'; dataUri: string }
+  | {
+      kind: 'image';
+      dataUri: string;
+      /**
+       * Display size in points, filled in later from the document's own
+       * wp:extent. Absent means layout has to guess, which is what made a
+       * 1pt divider rule reserve half a page.
+       */
+      width?: number;
+      height?: number;
+    }
   | { kind: 'rule' };
 
 const ENTITIES: Record<string, string> = {

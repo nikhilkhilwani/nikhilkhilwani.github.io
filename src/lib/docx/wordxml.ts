@@ -237,3 +237,101 @@ export function correlate<T extends { kind: string; runs?: { text: string }[] }>
 
   return { applied, skipped, attach: (block) => map.get(block) };
 }
+
+/** EMUs per point. Word stores drawing sizes in English Metric Units. */
+export const EMU = 914400 / 72;
+
+export interface ImageExtent {
+  /** Display width in points, as Word showed it. */
+  width: number;
+  height: number;
+}
+
+/**
+ * The display size of each image, in document order.
+ *
+ * This is the fix for an 8-page resume. Without it, layout has no idea how big
+ * an image is and reserved the full text width at a hardcoded 4:3 ratio — about
+ * 425pt. Resume templates draw their section dividers as images 1pt tall, so
+ * eight rules cost four blank pages.
+ *
+ * `mc:Fallback` is stripped first. A drawing wrapped in mc:AlternateContent
+ * appears twice, once per branch, so counting raw <wp:extent> gives exactly
+ * double and every image would take the next image's size.
+ */
+export function readImageExtents(documentXml: string): ImageExtent[] {
+  const primary = documentXml.replace(/<mc:Fallback>[\s\S]*?<\/mc:Fallback>/g, '');
+  const out: ImageExtent[] = [];
+  for (const m of primary.matchAll(/<wp:extent\s+cx="(\d+)"\s+cy="(\d+)"/g)) {
+    const width = Number(m[1]) / EMU;
+    const height = Number(m[2]) / EMU;
+    if (Number.isFinite(width) && Number.isFinite(height) && width > 0 && height > 0) {
+      out.push({ width, height });
+    } else {
+      // Keep the slot so later images do not shift onto the wrong extent.
+      out.push({ width: 0, height: 0 });
+    }
+  }
+  return out;
+}
+
+/**
+ * Intrinsic pixel size straight out of the image bytes, as a fallback for
+ * documents that declare no extent. Pure header parsing — no canvas, so it
+ * works in Node and in a worker.
+ *
+ * Pixels are treated as 96dpi, which is what Word assumes when it places an
+ * image at its natural size.
+ */
+export function intrinsicSize(dataUri: string): ImageExtent | null {
+  const comma = dataUri.indexOf(',');
+  if (comma < 0) return null;
+  let bytes: Uint8Array;
+  try {
+    const raw = dataUri.slice(comma + 1);
+    if (typeof atob === 'function') {
+      const bin = atob(raw);
+      bytes = new Uint8Array(bin.length);
+      for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    } else {
+      bytes = new Uint8Array(Buffer.from(raw, 'base64'));
+    }
+  } catch {
+    return null;
+  }
+
+  const px = (w: number, h: number): ImageExtent => ({ width: (w * 72) / 96, height: (h * 72) / 96 });
+  const be32 = (i: number) =>
+    ((bytes[i] << 24) | (bytes[i + 1] << 16) | (bytes[i + 2] << 8) | bytes[i + 3]) >>> 0;
+  const be16 = (i: number) => (bytes[i] << 8) | bytes[i + 1];
+
+  // PNG: 8-byte signature, then an IHDR chunk whose data starts at byte 16.
+  if (bytes.length > 24 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) {
+    return px(be32(16), be32(20));
+  }
+
+  // JPEG: walk the segment chain to a start-of-frame marker.
+  if (bytes.length > 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    let i = 2;
+    while (i + 9 < bytes.length) {
+      if (bytes[i] !== 0xff) {
+        i++;
+        continue;
+      }
+      const marker = bytes[i + 1];
+      // SOF0..SOF15, skipping the non-frame markers in that range.
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return px(be16(i + 7), be16(i + 5));
+      }
+      if (marker === 0xd8 || marker === 0x01 || (marker >= 0xd0 && marker <= 0xd9)) {
+        i += 2;
+        continue;
+      }
+      const length = be16(i + 2);
+      if (length < 2) return null;
+      i += 2 + length;
+    }
+  }
+
+  return null;
+}

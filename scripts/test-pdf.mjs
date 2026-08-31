@@ -748,6 +748,100 @@ const plain = await makePlain();
   const ndPdf = await pdfjs.getDocument({ data: new Uint8Array(noDev.bytes), isEvalSupported: false }).promise;
   const ndText = (await (await ndPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join('');
   ok(ndText.includes('Hindi'), 'word: the Latin part still converts when a script font is missing');
+
+  /* --- image sizing: the bug that turned a 2-page resume into 8 pages --- */
+
+  // Section dividers in resume templates are images 1pt tall. layout knew no
+  // size and reserved the full text width at a hardcoded 4:3 ratio, so eight
+  // rules cost four blank pages. This exercises the whole path: wp:extent read
+  // from document.xml, correlated to mammoth's image blocks in order, then used
+  // by layout.
+  const PNG_1PX =
+    'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8DwHwAFAAH/q842iQAAAABJRU5ErkJggg==';
+  const EMU_PER_PT = 914400 / 72;
+  const emu = (pt) => Math.round(pt * EMU_PER_PT);
+
+  // An anchored drawing wrapped the way Word writes it, Fallback branch included,
+  // so the de-duplication is exercised rather than assumed.
+  const rule = (id, heightPt = 1) =>
+    '<w:p><w:r><mc:AlternateContent><mc:Choice Requires="wps">' +
+    `<w:drawing><wp:anchor><wp:extent cx="${emu(500)}" cy="${emu(heightPt)}"/>` +
+    `<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId${id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>` +
+    '</wp:anchor></w:drawing></mc:Choice>' +
+    `<mc:Fallback><w:drawing><wp:anchor><wp:extent cx="${emu(500)}" cy="${emu(400)}"/>` +
+    `<a:graphic><a:graphicData><pic:pic><pic:blipFill><a:blip r:embed="rId${id}"/></pic:blipFill></pic:pic></a:graphicData></a:graphic>` +
+    '</wp:anchor></w:drawing></mc:Fallback></mc:AlternateContent></w:r></w:p>';
+
+  const RULES = 8;
+  let ruleBody = '';
+  for (let i = 0; i < RULES; i++) {
+    ruleBody += `<w:p><w:pPr><w:pStyle w:val="Heading2"/></w:pPr><w:r><w:t>Section ${i + 1}</w:t></w:r></w:p>`;
+    ruleBody += rule(100 + i, i + 1);
+    ruleBody += p(`Body text under section ${i + 1}.`);
+  }
+
+  const NS =
+    'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships" ' +
+    'xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" ' +
+    'xmlns:wp="http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing" ' +
+    'xmlns:a="http://schemas.openxmlformats.org/drawingml/2006/main" ' +
+    'xmlns:pic="http://schemas.openxmlformats.org/drawingml/2006/picture"';
+
+  let rels =
+    '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">';
+  for (let i = 0; i < RULES; i++) {
+    rels += `<Relationship Id="rId${100 + i}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/image" Target="media/rule.png"/>`;
+  }
+  rels += '</Relationships>';
+
+  const withRules = zipSync({
+    '[Content_Types].xml': strToU8(
+      '<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Default Extension="png" ContentType="image/png"/>' +
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/></Types>',
+    ),
+    '_rels/.rels': strToU8(
+      '<?xml version="1.0"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/></Relationships>',
+    ),
+    'word/_rels/document.xml.rels': strToU8(rels),
+    'word/media/rule.png': new Uint8Array(Buffer.from(PNG_1PX, 'base64')),
+    'word/document.xml': strToU8(
+      `<?xml version="1.0"?><w:document ${NS}><w:body>${ruleBody}</w:body></w:document>`,
+    ),
+  });
+
+  const ruled = await docxToPdf(withRules);
+  ok(
+    ruled.pages <= 2,
+    `word: ${RULES} hairline divider rules do not inflate the page count (${ruled.pages} page(s))`,
+  );
+
+  // Each rule was declared 1pt taller than the last, so the sizes must come back
+  // in that order. Equal sizes would let an off-by-one in the correlation pass
+  // unnoticed, which is how the real resume hid one.
+  eq(ruled.imageSizes.length, RULES, `word: a size was resolved for each of the ${RULES} images`);
+  eq(
+    ruled.imageSizes.map((z) => Math.round(z.height)).join(','),
+    Array.from({ length: RULES }, (_, i) => i + 1).join(','),
+    'word: image sizes line up with the images in document order, not shifted',
+  );
+  ok(
+    ruled.imageSizes.every((z) => Math.abs(z.width - 500) < 0.5),
+    'word: every rule kept its declared 500pt width',
+  );
+
+  const ruledPdf = await pdfjs.getDocument({ data: new Uint8Array(ruled.bytes), isEvalSupported: false }).promise;
+  let ruledText = '';
+  for (let n = 1; n <= ruledPdf.numPages; n++) {
+    ruledText += (await (await ruledPdf.getPage(n)).getTextContent()).items.map((i) => i.str).join(' ') + ' ';
+  }
+  for (let i = 1; i <= RULES; i++) {
+    ok(ruledText.includes(`Section ${i}`), `word: section ${i} heading survived alongside the rules`);
+  }
+  ok(ruledText.includes(`Body text under section ${RULES}.`), 'word: the last paragraph is present');
 }
 
 

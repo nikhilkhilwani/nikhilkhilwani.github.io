@@ -34,6 +34,7 @@ import {
 import {
   scriptKeyFor, scriptsIn, segmentByScript, scriptFont, SCRIPT_FONTS, RTL_SCRIPTS, LATIN,
 } from '../src/lib/docx/scripts.ts';
+import { readImageExtents, intrinsicSize, EMU } from '../src/lib/docx/wordxml.ts';
 import {
   twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables,
 } from '../src/lib/docx/wordxml.ts';
@@ -1170,6 +1171,98 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
   const marker = pieces.find((piece) => piece.text === '•');
   ok(marker !== undefined, 'the bullet marker was drawn');
   eq(marker?.font, LATIN, 'the bullet is drawn with the Latin face, not the Devanagari one');
+}
+
+
+/* ------------------------------------------------ image sizing: the 8-page resume */
+
+// A real resume converted to 8 pages instead of 2. Its section dividers are
+// images 508 x 1 pt, but layout knew no size and reserved the full text width at
+// a hardcoded 4:3 ratio - about 425pt each. Eight rules, four blank pages.
+
+{
+  const emu = (pt) => Math.round(pt * EMU);
+  const drawing = (w, h) => `<w:drawing><wp:anchor><wp:extent cx="${emu(w)}" cy="${emu(h)}"/></wp:anchor></w:drawing>`;
+
+  const xml = `<w:body>${drawing(508.4, 1)}${drawing(120, 90)}</w:body>`;
+  const extents = readImageExtents(xml);
+  eq(extents.length, 2, 'two extents read');
+  ok(Math.abs(extents[0].width - 508.4) < 0.1, `first extent width ${extents[0].width.toFixed(1)}pt`);
+  ok(Math.abs(extents[0].height - 1) < 0.05, `first extent height ${extents[0].height.toFixed(2)}pt - a hairline rule`);
+  ok(Math.abs(extents[1].height - 90) < 0.1, 'second extent height 90pt');
+
+  // mc:AlternateContent holds the same drawing twice, once per branch. Counting
+  // raw <wp:extent> returns double and every image takes the NEXT one's size.
+  const alt =
+    `<w:body><mc:AlternateContent><mc:Choice>${drawing(508.4, 1)}</mc:Choice>` +
+    `<mc:Fallback>${drawing(999, 999)}</mc:Fallback></mc:AlternateContent></w:body>`;
+  const deduped = readImageExtents(alt);
+  eq(deduped.length, 1, 'an mc:AlternateContent drawing is counted once, not twice');
+  ok(Math.abs(deduped[0].height - 1) < 0.05, 'and it is the Choice branch size, not the Fallback');
+
+  eq(readImageExtents('<w:body/>').length, 0, 'a document with no drawings yields no extents');
+}
+
+{
+  // intrinsicSize reads the header only, so a hand-built PNG signature+IHDR is
+  // a complete fixture.
+  const png = (w, h) => {
+    const bytes = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 13, 0x49, 0x48, 0x44, 0x52];
+    for (const v of [w, h]) bytes.push((v >>> 24) & 255, (v >>> 16) & 255, (v >>> 8) & 255, v & 255);
+    while (bytes.length < 33) bytes.push(0);
+    return 'data:image/png;base64,' + Buffer.from(bytes).toString('base64');
+  };
+
+  const size = intrinsicSize(png(96, 48));
+  ok(size !== null, 'a PNG header is understood');
+  // 96 CSS pixels at 96dpi is one inch, which is 72pt.
+  ok(Math.abs(size.width - 72) < 0.01, `96px wide becomes ${size.width.toFixed(1)}pt`);
+  ok(Math.abs(size.height - 36) < 0.01, `48px tall becomes ${size.height.toFixed(1)}pt`);
+
+  eq(intrinsicSize('not-a-data-uri'), null, 'a non-data-uri yields null rather than throwing');
+  eq(intrinsicSize('data:image/webp;base64,AAAA'), null, 'an unreadable format yields null');
+}
+
+{
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const rule = { kind: 'image', dataUri: 'data:image/png;base64,AAAA', width: 508.4, height: 1 };
+
+  const sized = layout([rule], { geometry: A4, scale: DEFAULT_SCALE, measure });
+  const img = sized[0].items.find((i) => i.kind === 'image');
+  ok(img !== undefined, 'the rule was laid out');
+  ok(Math.abs(img.height - 1) < 0.5, `a 1pt rule reserves ${img.height.toFixed(1)}pt, not a fifth of a page`);
+
+  // Eight rules and a heading must still be one page. Before the fix this was
+  // five pages, four of them blank.
+  const eight = [];
+  for (let i = 0; i < 8; i++) {
+    eight.push({ kind: 'heading', level: 2, runs: [{ text: `Section ${i + 1}` }] });
+    eight.push({ ...rule });
+  }
+  const pages = layout(eight, { geometry: A4, scale: DEFAULT_SCALE, measure });
+  eq(pages.length, 1, `eight headings each followed by a hairline rule fit on one page (got ${pages.length})`);
+
+  // An image wider than the column is scaled DOWN, keeping its aspect ratio.
+  const wide = layout([{ kind: 'image', dataUri: 'data:,', width: 2000, height: 1000 }], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+  });
+  const scaled = wide[0].items.find((i) => i.kind === 'image');
+  ok(scaled.width <= A4.width - A4.margin * 2 + 0.01, 'an oversized image is capped to the text width');
+  ok(Math.abs(scaled.width / scaled.height - 2) < 0.01, 'and keeps its 2:1 aspect ratio');
+
+  // A small image is NOT blown up to fill the column.
+  const small = layout([{ kind: 'image', dataUri: 'data:,', width: 40, height: 40 }], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+  });
+  const kept = small[0].items.find((i) => i.kind === 'image');
+  ok(Math.abs(kept.width - 40) < 0.01, `a 40pt icon stays 40pt wide (got ${kept.width.toFixed(1)})`);
+
+  // With no declared size the old guess still applies - that is the fallback,
+  // and it must not crash.
+  const guessed = layout([{ kind: 'image', dataUri: 'data:,' }], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+  });
+  ok(guessed.length >= 1, 'an image with no size at all still lays out');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

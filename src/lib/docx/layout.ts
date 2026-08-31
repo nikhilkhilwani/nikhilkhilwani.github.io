@@ -401,8 +401,24 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
     }
 
     if (block.kind === 'image') {
-      const width = Math.min(options.maxImageWidth ?? textWidth, textWidth);
-      const height = width * 0.75;
+      const cap = Math.min(options.maxImageWidth ?? textWidth, textWidth);
+
+      // Word's own display size when the document declared one. Without it this
+      // reserved the full text width at a hardcoded 4:3 ratio — about 425pt on
+      // A4. Resume templates draw their section dividers as images 1pt tall, so
+      // eight rules used to cost four entirely blank pages.
+      let width: number;
+      let height: number;
+      if (block.width && block.height && block.width > 0 && block.height > 0) {
+        // Only ever scaled DOWN: an icon must not be blown up to fill the column.
+        const fit = Math.min(1, cap / block.width);
+        width = block.width * fit;
+        height = block.height * fit;
+      } else {
+        width = cap;
+        height = width * 0.75;
+      }
+
       if (!room(height + 12)) newPage();
       y -= 6;
       items.push({ kind: 'image', x: geometry.margin, y: y - height, width, height, dataUri: block.dataUri });

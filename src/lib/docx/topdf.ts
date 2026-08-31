@@ -24,7 +24,10 @@
 import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
 import { loadFonts, browserFontSource, needsFromFlags, type FontSource, type StyleKey } from './fonts.ts';
 import { LATIN, RTL_SCRIPTS, scriptFont, scriptsIn } from './scripts.ts';
-import { readParagraphProps, readPageSetup, correlate, type PageSetup } from './wordxml.ts';
+import {
+  readParagraphProps, readPageSetup, correlate, readImageExtents, intrinsicSize,
+  type PageSetup,
+} from './wordxml.ts';
 import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
 
 let cachedMammoth: Promise<typeof import('mammoth')> | null = null;
@@ -79,6 +82,15 @@ export interface ConvertResult {
   scriptsMissing: string[];
   /** True when a right-to-left script is present, where mixed lines need bidi. */
   rtl: boolean;
+  /**
+   * The display size finally used for each image, in document order.
+   *
+   * Exposed because the correlation between wp:extent and mammoth's image
+   * blocks is positional, and an off-by-one there is invisible in the output
+   * whenever the images happen to share a size — which is exactly the case in
+   * the resume that surfaced the bug.
+   */
+  imageSizes: { width: number; height: number }[];
 }
 
 export interface ConvertOptions {
@@ -163,6 +175,19 @@ export async function docxToPdf(
     const documentXml = entries['word/document.xml'] ? strFromU8(entries['word/document.xml']) : '';
 
     if (documentXml) {
+      // Image display sizes, matched to the image blocks in document order.
+      // mammoth drops them, and without them layout has to guess.
+      const extents = readImageExtents(documentXml);
+      let nth = 0;
+      for (const block of blocks) {
+        if (block.kind !== 'image') continue;
+        const declared = extents[nth++];
+        if (declared && declared.width > 0 && declared.height > 0) {
+          block.width = declared.width;
+          block.height = declared.height;
+        }
+      }
+
       pageSetup = readPageSetup(documentXml);
       const props = readParagraphProps(documentXml);
       const matched = correlate(blocks, props);
@@ -176,6 +201,17 @@ export async function docxToPdf(
     }
   } catch {
     // Deliberately silent: this is an enhancement, not a requirement.
+  }
+
+  // Anything the document did not declare falls back to the image's intrinsic
+  // pixel size, which still beats a hardcoded 4:3 guess at full column width.
+  for (const block of blocks) {
+    if (block.kind !== 'image' || (block.width && block.height)) continue;
+    const size = intrinsicSize(block.dataUri);
+    if (size && size.width > 0 && size.height > 0) {
+      block.width = size.width;
+      block.height = size.height;
+    }
   }
 
   // Named to avoid colliding with the `page` loop variable below.
@@ -388,6 +424,9 @@ export async function docxToPdf(
     scripts: [...scripts].filter((k) => !(loaded?.missing ?? []).includes(k)),
     scriptsMissing: loaded?.missing ?? [...scripts],
     rtl: [...scripts].some((k) => RTL_SCRIPTS.has(k)),
+    imageSizes: blocks
+      .filter((b): b is Extract<Block, { kind: 'image' }> => b.kind === 'image')
+      .map((b) => ({ width: b.width ?? 0, height: b.height ?? 0 })),
   };
 }
 
