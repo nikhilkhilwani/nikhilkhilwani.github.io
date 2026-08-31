@@ -12,6 +12,18 @@ interface Props {
 const { title, description, bare = false } = Astro.props;
 
 const canonical = new URL(Astro.url.pathname, Astro.site).href;
+
+// Header links. `build.format: 'directory'` means every URL carries a trailing
+// slash, so the path is normalised before comparing — otherwise nothing ever
+// matches and no tab is ever marked current.
+const NAV = [
+  { href: '/about', label: 'About' },
+  { href: '/experience', label: 'Experience' },
+  { href: '/projects', label: 'Projects' },
+  { href: '/certifications', label: 'Certifications' },
+  { href: '/tools', label: 'Tools' },
+];
+const path = Astro.url.pathname.replace(/\/+$/, '') || '/';
 const year = new Date().getFullYear();
 ---
 
@@ -52,9 +64,18 @@ const year = new Date().getFullYear();
               <span class="hdr__name">Nikhil Khilwani</span>
             </a>
             <nav class="hdr__nav" aria-label="Main">
-              <a href="/tools" aria-current={Astro.url.pathname.startsWith('/tools') ? 'page' : undefined}>
-                Tools
-              </a>
+              {
+                NAV.map((item) => (
+                  <a
+                    href={item.href}
+                    aria-current={
+                      path === item.href || path.startsWith(`${item.href}/`) ? 'page' : undefined
+                    }
+                  >
+                    {item.label}
+                  </a>
+                ))
+              }
             </nav>
           </div>
         </header>
@@ -148,6 +169,25 @@ const year = new Date().getFullYear();
   }
   .hdr__nav a:hover { color: var(--accent); }
   .hdr__nav a[aria-current='page'] { color: var(--ink); border-bottom-color: var(--accent); }
+
+  /* Five links will not fit beside the brand on a phone — at 320px the row
+     alone needs roughly 380px. Below 700px the header becomes two rows and the
+     nav wraps, which keeps every 44px tap target and never pushes the document
+     wider than the viewport. */
+  .hdr__nav { flex-wrap: wrap; }
+  @media (max-width: 700px) {
+    .hdr__in {
+      flex-direction: column;
+      align-items: flex-start;
+      gap: 0;
+      padding-block: 0.35rem;
+    }
+    .hdr__nav {
+      gap: 0 1.1rem;
+      font-size: 0.85rem;
+      width: 100%;
+    }
+  }
 
   .ftr {
     position: relative;

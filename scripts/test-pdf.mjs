@@ -26,7 +26,21 @@ import { unlockPdf } from '../src/lib/pdf/unlock.ts';
 import { recompressImages, flattenToImages, percentSaved, estimateRecompress, describeEstimate } from '../src/lib/pdf/compress.ts';
 import sharp from 'sharp';
 import { zipSync, strToU8 } from 'fflate';
-import { docxToPdf, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
+import { docxToPdf as docxToPdfRaw, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
+import { readFile as readFileFs } from 'node:fs/promises';
+import { join as joinPath } from 'node:path';
+
+/**
+ * The converter fetches /fonts/*.ttf in the browser, which cannot work here —
+ * without this every docx test would quietly fall back to the built-in fonts
+ * and the metric-compatible path, the whole point of fonts.ts, would go
+ * completely untested in CI. Reading the same committed files off disk means
+ * every existing assertion below exercises the real embedding path.
+ */
+const nodeFontSource = async (file) =>
+  new Uint8Array(await readFileFs(joinPath(process.cwd(), 'public', 'fonts', file)));
+
+const docxToPdf = (input, opts = {}) => docxToPdfRaw(input, { fontSource: nodeFontSource, ...opts });
 import { OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
 
 let fail = 0;
@@ -581,6 +595,71 @@ const plain = await makePlain();
   const hindiPdf = await pdfjs.getDocument({ data: new Uint8Array(hindi.bytes), isEvalSupported: false }).promise;
   const hindiText = (await (await hindiPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join(' ');
   ok(hindiText.includes('Hello and'), 'word: the Latin part still renders alongside it');
+
+  /* --- the metric-compatible fonts: prove the path is live, not falling back --- */
+
+  // loadMetricFonts() returns null on any failure and the converter silently
+  // uses the built-ins, so every assertion above would still pass with the new
+  // code completely inert. This is the assertion that catches that.
+  ok(result.metricFonts, 'word: Carlito was embedded, not the standard-14 fallback');
+
+  // The font's own name table travels with the embedded program, so finding it
+  // proves which typeface actually reached the page. Not matched as
+  // "ABCDEF+Carlito": pdf-lib compresses the object streams, so the /BaseFont
+  // entry carrying the subset tag is not visible in the raw bytes.
+  const raw = Buffer.from(result.bytes).toString('latin1');
+  ok(raw.includes('Carlito'), 'word: the embedded font program is Carlito');
+  ok(!raw.includes('Times'), 'word: no standard-14 Times font was embedded alongside it');
+
+  // subset:true is what keeps this small. Whole-font embedding measured 278KB
+  // for ONE face and 2.5MB for four, so this ceiling is a real tripwire for
+  // subsetting silently regressing.
+  ok(
+    result.bytes.length < 250_000,
+    `word: subsetting keeps the PDF small (${(result.bytes.length / 1024).toFixed(0)}KB)`,
+  );
+
+  /* --- scripts that used to become "?" --- */
+
+  const wide = await docxToPdf(
+    build(p('Привет мир — Ελληνικά — Tiếng Việt — Łódź, Kraków, Gdańsk')),
+  );
+  eq(wide.unsupported.length, 0, 'word: Cyrillic, Greek, Vietnamese and Polish are all supported now');
+  ok(wide.metricFonts, 'word: the wide-script document used the embedded font');
+  const widePdf = await pdfjs.getDocument({ data: new Uint8Array(wide.bytes), isEvalSupported: false }).promise;
+  const wideText = (await (await widePdf.getPage(1)).getTextContent()).items.map((i) => i.str).join('');
+  ok(wideText.includes('Привет мир'), 'word: Cyrillic round-trips through the PDF as real text');
+  ok(wideText.includes('Ελληνικά'), 'word: Greek round-trips through the PDF as real text');
+  ok(wideText.includes('Tiếng Việt'), 'word: Vietnamese diacritics round-trip');
+  ok(wideText.includes('Gdańsk'), 'word: Polish diacritics round-trip');
+
+  /* --- extraction fidelity: the regression an embedded font can introduce --- */
+
+  // Without subsetting, pdf-lib's ToUnicode table maps the "ti" ligature glyph
+  // back to the wrong character and "Latin" extracts as "Laࢢn". Searchable text
+  // is this tool's headline promise, so it gets an exact-match assertion.
+  const ligatures = 'Latin notification ratification difficult affluent office shuffle';
+  const lig = await docxToPdf(build(p(ligatures)));
+  const ligPdf = await pdfjs.getDocument({ data: new Uint8Array(lig.bytes), isEvalSupported: false }).promise;
+  const ligText = (await (await ligPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join('');
+  eq(ligText.trim(), ligatures, 'word: ligature-heavy text extracts back character-for-character');
+
+  /* --- the fallback must still work when the fonts cannot be loaded --- */
+
+  const offline = await docxToPdf(build(p('Fallback path with José')), {
+    fontSource: async () => {
+      throw new Error('no fonts here');
+    },
+  });
+  eq(offline.metricFonts, false, 'word: an unreachable font falls back instead of throwing');
+  ok(offline.pages >= 1, 'word: the fallback still produces a PDF');
+  ok(
+    describeConversion(offline).includes('metric-compatible fonts did not load'),
+    'word: the summary admits the fallback rather than implying Word-matching output',
+  );
+  const offPdf = await pdfjs.getDocument({ data: new Uint8Array(offline.bytes), isEvalSupported: false }).promise;
+  const offText = (await (await offPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join('');
+  ok(offText.includes('Fallback path'), 'word: the fallback output is still real text');
 }
 
 

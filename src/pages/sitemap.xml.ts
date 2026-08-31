@@ -5,7 +5,9 @@ import { availableTools, toolPath } from '../data/tools';
 // in one place, and coming-soon tools must stay out of it.
 export const GET: APIRoute = ({ site }) => {
   const base = (site ?? new URL('https://nikhilkhilwani.github.io')).origin;
-  const paths = ['/', '/tools', ...availableTools.map((t) => toolPath(t.slug))];
+  // Portfolio pages rank above the individual tools.
+  const pages = ['/', '/about', '/experience', '/projects', '/certifications', '/tools'];
+  const paths = [...pages, ...availableTools.map((t) => toolPath(t.slug))];
   const today = new Date().toISOString().slice(0, 10);
 
   const body = `<?xml version="1.0" encoding="UTF-8"?>
@@ -16,7 +18,7 @@ ${paths
     <loc>${base}${p}</loc>
     <lastmod>${today}</lastmod>
     <changefreq>weekly</changefreq>
-    <priority>${p === '/' ? '1.0' : p === '/tools' ? '0.9' : '0.8'}</priority>
+    <priority>${p === '/' ? '1.0' : pages.includes(p) ? '0.9' : '0.8'}</priority>
   </url>`,
   )
   .join('\n')}

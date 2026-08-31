@@ -37,6 +37,7 @@ jobs:
       # Verifies the built pages against their scripts — catches an id typo
       # that neither TypeScript nor the unit tests can see.
       - run: node scripts/test-dom.mjs
+      - run: node scripts/test-pages.mjs
       - uses: actions/upload-pages-artifact@v3
         with:
           path: dist

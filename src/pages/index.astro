@@ -2,36 +2,48 @@
 import BaseLayout from '../layouts/BaseLayout.astro';
 import Icon from '../components/Icon.astro';
 import { availableTools } from '../data/tools';
+import { profile, projects } from '../data/profile';
 
 const liveCount = availableTools.length;
+const featured = projects.find((p) => p.featured) ?? projects[0];
+
+const sections = [
+  { href: '/about', label: 'About', note: 'What I build, and what I build it with.' },
+  { href: '/experience', label: 'Experience', note: 'Roles and work history.' },
+  { href: '/projects', label: 'Projects', note: 'Everything I have shipped.' },
+  { href: '/certifications', label: 'Certifications', note: 'Credentials, verifiable.' },
+];
 ---
 
 <BaseLayout
-  title="Nikhil Khilwani — Coming Soon"
-  description="Personal portfolio of Nikhil Khilwani. The full site is coming soon — free browser-based tools are live now."
+  title={`${profile.name} — Portfolio`}
+  description={`Personal portfolio of ${profile.name}. ${liveCount} free, private, browser-based file tools — no uploads and no accounts.`}
 >
   <div class="shell hero">
-    <p class="badge fade"><span class="dot" aria-hidden="true"></span> Coming soon</p>
+    <p class="badge fade">
+      <span class="dot" aria-hidden="true"></span>
+      {liveCount} free tools live
+    </p>
 
     <h1 class="fade">Nikhil<span class="sur">Khilwani</span></h1>
 
     <div class="rule fade" aria-hidden="true"></div>
 
     <p class="lede fade">
-      A new portfolio is <strong>in the works</strong> — selected projects, writing, and the things
-      I am building. In the meantime, {liveCount} free tools are already live.
+      {profile.headline} Everything here runs <strong>entirely in your browser</strong> — no
+      uploads, no accounts, nothing collected.
     </p>
 
     <div class="cta fade">
-      <a class="btn btn--solid" href="/tools">
-        Explore the tools <Icon name="arrow" size={15} />
+      <a class="btn btn--solid" href="/projects">
+        See my work <Icon name="arrow" size={15} />
       </a>
-      <span class="cta__note">No uploads · no accounts</span>
+      <a class="btn" href="/tools">Try the tools</a>
     </div>
 
     <ul class="links fade">
       <li>
-        <a href="mailto:khilwaninikhil22@gmail.com">
+        <a href={`mailto:${profile.email}`}>
           <svg viewBox="0 0 24 24" aria-hidden="true"
             ><path
               d="M20 4H4a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V6a2 2 0 0 0-2-2Zm0 4.24-8 5-8-5V6l8 5 8-5Z"
@@ -62,6 +74,38 @@ const liveCount = availableTools.length;
       </li>
     </ul>
   </div>
+
+  <div class="shell home">
+    {
+      featured && (
+        <section class="feat">
+          <p class="eyebrow">Currently building</p>
+          <h2 class="feat__name">{featured.name}</h2>
+          <p class="feat__blurb">{featured.blurb}</p>
+          <ul class="chips">
+            {featured.stack.map((s) => <li class="chip">{s}</li>)}
+          </ul>
+          <a class="feat__go" href={featured.href ?? '/projects'}>
+            Open the toolbox <Icon name="arrow" size={14} />
+          </a>
+        </section>
+      )
+    }
+
+    <nav class="secs" aria-label="Sections">
+      {
+        sections.map((s) => (
+          <a href={s.href}>
+            <span class="secs__label">
+              {s.label}
+              <Icon name="arrow" size={14} />
+            </span>
+            <span class="secs__note">{s.note}</span>
+          </a>
+        ))
+      }
+    </nav>
+  </div>
 </BaseLayout>
 
 <style>
@@ -69,8 +113,7 @@ const liveCount = availableTools.length;
     display: flex;
     flex-direction: column;
     justify-content: center;
-    min-height: 100%;
-    padding-block: clamp(40px, 8vw, 80px);
+    padding-block: clamp(40px, 8vw, 80px) clamp(32px, 6vw, 64px);
   }
 
   .badge {
@@ -114,7 +157,7 @@ const liveCount = availableTools.length;
     margin: clamp(24px, 4vw, 38px) 0;
   }
 
-  .lede { font-size: clamp(1.02rem, 2.4vw, 1.3rem); max-width: 44ch; }
+  .lede { font-size: clamp(1.02rem, 2.4vw, 1.3rem); max-width: 46ch; }
   .lede strong { color: var(--ink); font-weight: 400; }
 
   .cta {
@@ -123,12 +166,6 @@ const liveCount = availableTools.length;
     flex-wrap: wrap;
     gap: 0.75rem 1.1rem;
     margin-top: clamp(26px, 4vw, 38px);
-  }
-  .cta__note {
-    font-size: 0.74rem;
-    letter-spacing: 0.1em;
-    text-transform: uppercase;
-    color: var(--ink-faint);
   }
 
   .links {
@@ -152,6 +189,75 @@ const liveCount = availableTools.length;
   }
   .links a:hover { color: var(--accent); border-bottom-color: var(--accent); }
   .links svg { width: 15px; height: 15px; fill: currentColor; opacity: 0.8; }
+
+  /* ---------- below the fold ---------- */
+  .home {
+    display: grid;
+    gap: clamp(28px, 5vw, 48px);
+    padding-bottom: clamp(20px, 4vw, 40px);
+  }
+
+  .feat {
+    display: grid;
+    gap: 0.85rem;
+    border-top: 1px solid var(--line);
+    padding-top: clamp(28px, 5vw, 44px);
+  }
+  .feat__name {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(1.4rem, 4vw, 1.9rem);
+    letter-spacing: -0.015em;
+    margin: 0;
+  }
+  .feat__blurb {
+    margin: 0;
+    color: var(--ink-dim);
+    line-height: 1.75;
+    max-width: 68ch;
+  }
+  .feat__go {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    justify-self: start;
+    min-height: 44px;
+    font-size: 0.9rem;
+    color: var(--ink);
+    text-decoration: none;
+    border-bottom: 1px solid var(--accent);
+  }
+  .feat__go:hover { color: var(--accent); }
+
+  .secs {
+    display: grid;
+    gap: 0.5rem;
+    border-top: 1px solid var(--line);
+    padding-top: clamp(24px, 4vw, 36px);
+  }
+  @media (min-width: 720px) {
+    .secs { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0.6rem; }
+  }
+  .secs a {
+    display: grid;
+    gap: 0.3rem;
+    padding: 0.85rem 1rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--surface);
+    text-decoration: none;
+    transition: border-color 0.2s;
+  }
+  .secs a:hover { border-color: var(--line-strong); }
+  .secs__label {
+    display: flex;
+    align-items: center;
+    gap: 0.4rem;
+    color: var(--ink);
+    font-size: 0.95rem;
+  }
+  .secs a:hover .secs__label { color: var(--accent); }
+  .secs__note { color: var(--ink-faint); font-size: 0.82rem; line-height: 1.5; }
 
   .fade {
     opacity: 0;

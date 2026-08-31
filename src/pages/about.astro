@@ -1,0 +1,107 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PageHead from '../components/PageHead.astro';
+import Icon from '../components/Icon.astro';
+import { profile, about, skills, socials } from '../data/profile';
+---
+
+<BaseLayout
+  title={`About — ${profile.name}`}
+  description={`About ${profile.name} — what I build and how I work.`}
+>
+  <div class="shell">
+    <PageHead
+      eyebrow="About"
+      title="A little context"
+      lede={profile.headline}
+    />
+
+    <div class="stack">
+      <section class="prose">
+        {about.map((para) => <p>{para}</p>)}
+      </section>
+
+      <section>
+        <h2 class="shead">What I work with</h2>
+        <div class="skills">
+          {
+            skills.map((group) => (
+              <div class="skills__group">
+                <p class="eyebrow">{group.label}</p>
+                <ul class="chips">
+                  {group.items.map((item) => <li class="chip">{item}</li>)}
+                </ul>
+              </div>
+            ))
+          }
+        </div>
+      </section>
+
+      <section>
+        <h2 class="shead">Where to find me</h2>
+        <ul class="find">
+          {
+            socials.map((s) => (
+              <li>
+                <a href={s.href} rel={s.href.startsWith('http') ? 'me noopener' : undefined}>
+                  <span class="find__label">{s.label}</span>
+                  <span class="find__handle">{s.handle}</span>
+                  <Icon name="arrow" size={14} />
+                </a>
+              </li>
+            ))
+          }
+        </ul>
+      </section>
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .prose { display: grid; gap: 1.1rem; }
+  .prose p {
+    margin: 0;
+    color: var(--ink-dim);
+    line-height: 1.78;
+    max-width: 66ch;
+    font-size: clamp(0.97rem, 2.4vw, 1.04rem);
+  }
+
+  .skills { display: grid; gap: 1.5rem; }
+  @media (min-width: 720px) {
+    .skills { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 1.6rem 2.5rem; }
+  }
+  .skills__group { display: grid; gap: 0.6rem; align-content: start; }
+
+  .find { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.5rem; max-width: 34rem; }
+  .find a {
+    display: flex;
+    align-items: center;
+    gap: 0.8rem;
+    min-height: 44px;
+    padding: 0.55rem 0.9rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    background: var(--surface);
+    text-decoration: none;
+    color: var(--ink-dim);
+    transition: border-color 0.2s, color 0.2s;
+  }
+  .find a:hover { border-color: var(--line-strong); color: var(--ink); }
+  .find__label { font-size: 0.9rem; color: var(--ink); }
+  .find__handle {
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+    margin-inline-start: auto;
+    /* Deliberately not `white-space: nowrap` with an ellipsis. `min-width: 0`
+       lets a nowrap item SHRINK once a width is handed to it, but the string
+       still contributes its full length to every ancestor's min-content — and
+       <body> is a grid, so that inflates the whole column and the page scrolls
+       sideways at 320px. Letting the address wrap removes the floor entirely,
+       and showing the full address beats truncating it on a contact link. */
+    min-width: 0;
+    overflow-wrap: anywhere;
+    text-align: end;
+  }
+</style>

@@ -328,6 +328,21 @@ export const spanWidth = (widths: number[], start: number, span: number, gap = 8
 };
 
 /**
+ * Left edge of a column, measured from the start of the text area.
+ *
+ * Deliberately NOT spanWidth(widths, 0, start). That clamps the span to at
+ * least one column, which is right for a cell's own width — every cell covers
+ * at least one column — but wrong for an offset, where column 0 legitimately
+ * begins at zero. The clamp gave the first cell of every row a full column of
+ * offset, dropping it 8pt from the second cell so the two overlapped, and
+ * pushing the whole table right by one column.
+ */
+export const columnOffset = (widths: number[], start: number, gap = 8): number => {
+  const before = Math.max(0, start);
+  return widths.slice(0, before).reduce((sum, w) => sum + w, 0) + gap * before;
+};
+
+/**
  * Flows blocks onto pages.
  *
  * Two rules make the output read like a document rather than a dump: a heading
@@ -396,7 +411,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
         if (!room(rowHeight)) newPage();
 
         for (const m of measured) {
-          const x = geometry.margin + spanWidth(widths, 0, m.start, gap) + (m.start > 0 ? gap : 0);
+          const x = geometry.margin + columnOffset(widths, m.start, gap);
           items.push({ kind: 'cellBox', x, y: y - rowHeight, width: m.width, height: rowHeight });
           let ty = y - padding - scale.body;
           for (const line of m.lines) {

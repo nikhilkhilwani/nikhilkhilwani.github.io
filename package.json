@@ -10,7 +10,7 @@
     "check": "astro check",
     "test": "node scripts/test-tools.mjs && node scripts/test-pdf.mjs",
     "sync:pdfjs": "node scripts/sync-pdfjs.mjs",
-    "verify": "npm run check && npm run test && npm run build && node scripts/test-dom.mjs",
+    "verify": "npm run check && npm run test && npm run build && node scripts/test-dom.mjs && node scripts/test-pages.mjs",
     "test:pdf": "node scripts/test-pdf.mjs"
   },
   "dependencies": {
@@ -18,12 +18,14 @@
     "@pdf-lib/fontkit": "^1.1.1",
     "astro": "^5.6.1",
     "fflate": "^0.8.3",
+    "fontkit": "^2.0.4",
     "mammoth": "^1.12.1",
     "pdfjs-dist": "^6.2.108",
     "qrcode": "^1.5.4"
   },
   "devDependencies": {
     "@astrojs/check": "^0.9.10",
+    "@types/fontkit": "^2.0.9",
     "@types/qrcode": "^1.5.6",
     "typescript": "^5.9.3"
   }

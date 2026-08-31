@@ -406,7 +406,18 @@ export function parseBlocks(html: string): Block[] {
  * Those must be reported rather than dropped silently or allowed to throw
  * mid-render.
  */
-export function unsupportedCharacters(blocks: Block[]): string[] {
+/**
+ * Characters the chosen font cannot draw, so the caller can warn instead of
+ * shipping silent corruption.
+ *
+ * Pass `hasGlyph` when a real font is embedded and it is asked directly. With
+ * no predicate this falls back to the WinAnsi set the built-in standard-14
+ * fonts cover, which is the right answer only for that fallback path.
+ */
+export function unsupportedCharacters(
+  blocks: Block[],
+  hasGlyph?: (codePoint: number) => boolean,
+): string[] {
   const found = new Set<string>();
 
   const scan = (text: string) => {
@@ -414,6 +425,10 @@ export function unsupportedCharacters(blocks: Block[]): string[] {
       const code = ch.codePointAt(0) ?? 0;
       if (code === 9 || code === 10 || code === 13 || code === 32) continue;
       if (code < 0x20) continue;
+      if (hasGlyph) {
+        if (!hasGlyph(code)) found.add(ch);
+        continue;
+      }
       if (code <= 0xff) continue;
       if ('–—‘’‚“”„†‡•…‰‹›€™ŒœŠšŸŽžƒˆ˜'.includes(ch)) continue;
       found.add(ch);

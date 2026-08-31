@@ -1,0 +1,16 @@
+---
+// Title block for the portfolio pages. Styles are in global.css (.phead)
+// because several pages share them.
+interface Props {
+  eyebrow: string;
+  title: string;
+  lede?: string;
+}
+const { eyebrow, title, lede } = Astro.props;
+---
+
+<header class="phead">
+  <p class="eyebrow">{eyebrow}</p>
+  <h1>{title}</h1>
+  {lede && <p class="lede">{lede}</p>}
+</header>

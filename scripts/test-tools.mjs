@@ -28,7 +28,7 @@ import {
   orderedMarker, letters, roman,
 } from '../src/lib/docx/blocks.ts';
 import {
-  wrapRuns, layout, columnWidths, A4, DEFAULT_SCALE, nextTabStop, tableColumns, spanWidth,
+  wrapRuns, layout, columnWidths, A4, DEFAULT_SCALE, nextTabStop, tableColumns, spanWidth, columnOffset,
   alignLine, lineWidth,
 } from '../src/lib/docx/layout.ts';
 import {
@@ -714,6 +714,47 @@ eq(tableColumns([]), 1, 'an empty table still has one column');
 eq(spanWidth([50, 50, 50], 0, 1, 8), 50, 'a single column is its own width');
 eq(spanWidth([50, 50, 50], 0, 2, 8), 108, 'spanning two columns swallows the gap between them');
 eq(spanWidth([50, 50, 50], 0, 3, 8), 166, 'spanning three swallows two gaps');
+
+/* --- column offsets: cells used to be drawn on top of each other --- */
+
+// spanWidth clamps its span to at least one column, so reusing it to compute an
+// offset gave column 0 a full column of indent. Every table's first cell landed
+// 8pt from the second and the pair overlapped illegibly, while extraction still
+// returned both strings — which is why no existing assertion noticed.
+eq(columnOffset([50, 50, 50], 0, 8), 0, 'the first column starts at the text edge');
+eq(columnOffset([50, 50, 50], 1, 8), 58, 'the second column clears the first plus the gap');
+eq(columnOffset([50, 50, 50], 2, 8), 116, 'the third clears two columns and two gaps');
+eq(columnOffset([50, 50, 50], -1, 8), 0, 'a negative start is treated as the first column');
+
+{
+  // The whole point: laid-out cells must not overlap, and the row must span the
+  // full text width without spilling past the right margin.
+  const table = {
+    kind: 'table',
+    rows: [
+      [
+        { runs: [{ text: 'Region' }], span: 1 },
+        { runs: [{ text: 'Growth' }], span: 1 },
+      ],
+    ],
+  };
+  const pages = layout([table], { geometry: A4, scale: DEFAULT_SCALE, measure: (t, st) => t.length * st.size * 0.5 });
+  const boxes = pages[0].items.filter((i) => i.kind === 'cellBox');
+  eq(boxes.length, 2, 'both cells produced a box');
+  eq(Math.round(boxes[0].x), A4.margin, 'the first cell sits on the left margin');
+  ok(
+    boxes[0].x + boxes[0].width <= boxes[1].x + 0.01,
+    `cells do not overlap (first ends ${(boxes[0].x + boxes[0].width).toFixed(1)}, second starts ${boxes[1].x.toFixed(1)})`,
+  );
+  ok(
+    boxes[1].x + boxes[1].width <= A4.width - A4.margin + 0.01,
+    'the last cell stays inside the right margin',
+  );
+
+  const lines = pages[0].items.filter((i) => i.kind === 'line');
+  eq(lines.length, 2, 'both cells drew a line of text');
+  ok(Math.abs(lines[0].x - lines[1].x) > 40, 'the two cell texts are drawn far apart, not stacked');
+}
 
 {
   const many = Array.from({ length: 60 }, () => ({

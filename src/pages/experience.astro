@@ -1,0 +1,68 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PageHead from '../components/PageHead.astro';
+import Icon from '../components/Icon.astro';
+import { profile, experience } from '../data/profile';
+---
+
+<BaseLayout
+  title={`Experience — ${profile.name}`}
+  description={`Roles and work history of ${profile.name}.`}
+>
+  <div class="shell">
+    <PageHead
+      eyebrow="Experience"
+      title="Where I have worked"
+      lede={experience.length ? 'Most recent first.' : undefined}
+    />
+
+    {
+      experience.length > 0 ? (
+        <ol class="tl">
+          {experience.map((job) => (
+            <li class="panel">
+              <div class="tl__head">
+                <h2 class="tl__title">{job.position}</h2>
+                <span class="tl__org">{job.company}</span>
+                <span class="tl__meta">{job.duration}</span>
+              </div>
+              {job.location && <p class="tl__where">{job.location}</p>}
+              {job.summary && <p class="tl__body">{job.summary}</p>}
+              {job.highlights && job.highlights.length > 0 && (
+                <ul class="tl__points">
+                  {job.highlights.map((h) => <li>{h}</li>)}
+                </ul>
+              )}
+              {job.stack && job.stack.length > 0 && (
+                <ul class="chips tl__stack">
+                  {job.stack.map((s) => <li class="chip">{s}</li>)}
+                </ul>
+              )}
+            </li>
+          ))}
+        </ol>
+      ) : (
+        <div class="panel empty">
+          <strong>This page is still being written.</strong>
+          <p>
+            Rather than fill it with placeholder rows, it stays empty until the real
+            history is in. In the meantime, the work itself is the better read.
+          </p>
+          <a class="btn btn--solid btn--sm" href="/projects">
+            See what I have built <Icon name="arrow" size={14} />
+          </a>
+        </div>
+      )
+    }
+  </div>
+</BaseLayout>
+
+<style>
+  .tl__where {
+    margin: 0.35rem 0 0;
+    font-size: 0.82rem;
+    color: var(--ink-faint);
+  }
+  .tl__stack { margin-top: 0.95rem; }
+  .empty p { margin: 0; max-width: 58ch; }
+</style>

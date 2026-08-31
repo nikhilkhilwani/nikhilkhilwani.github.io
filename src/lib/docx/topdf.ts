@@ -5,13 +5,18 @@
  * a block model, layout.ts paginates it, and this module draws the result with
  * pdf-lib. The text stays real text: selectable, searchable, copyable.
  *
- * What this is NOT: a reimplementation of Word's layout engine. Line breaks
- * will not fall where Word puts them, because Word measures with Calibri and
- * Cambria — Microsoft-licensed fonts that cannot be redistributed. The tool
- * says so rather than implying a pixel-perfect conversion.
+ * Line breaks now match Word closely, because the text is measured and drawn
+ * with Carlito, whose advance widths are byte-identical to Calibri's. See
+ * fonts.ts for why that font and why the full fontkit is required.
+ *
+ * What this is NOT: a reimplementation of Word's layout engine. Headers,
+ * footers, explicit page breaks, columns and floating objects are still not
+ * reproduced, and scripts needing complex shaping (Devanagari, Arabic, Thai)
+ * cannot be drawn correctly at all — those are reported, not faked.
  */
 
 import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
+import { loadMetricFonts, browserFontSource, needsFromFlags, type FontSource } from './fonts.ts';
 import { readParagraphProps, readPageSetup, correlate, type PageSetup } from './wordxml.ts';
 import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
 
@@ -56,6 +61,11 @@ export interface ConvertResult {
   unstyled: number;
   /** Page setup taken from the document, when it had any. */
   pageSetup: PageSetup | null;
+  /**
+   * True when Carlito was embedded, so widths match Word. False means the font
+   * files could not be loaded and the WinAnsi built-ins were used instead.
+   */
+  metricFonts: boolean;
 }
 
 export interface ConvertOptions {
@@ -66,6 +76,12 @@ export interface ConvertOptions {
    * The explicit `geometry` is the fallback for documents that do not.
    */
   useDocumentPageSetup?: boolean;
+  /**
+   * Where the metric-compatible fonts come from. Defaults to fetching
+   * /fonts/*.ttf; scripts/test-pdf.mjs injects a reader so CI exercises the
+   * real embedding path without a browser.
+   */
+  fontSource?: FontSource;
 }
 
 /** A .docx is a ZIP; every one starts with the local file header "PK\x03\x04". */
@@ -75,7 +91,12 @@ export function looksLikeDocx(bytes: Uint8Array): boolean {
 
 export async function docxToPdf(
   input: Uint8Array,
-  { geometry = A4, scale = DEFAULT_SCALE, useDocumentPageSetup = true }: ConvertOptions = {},
+  {
+    geometry = A4,
+    scale = DEFAULT_SCALE,
+    useDocumentPageSetup = true,
+    fontSource = browserFontSource(),
+  }: ConvertOptions = {},
 ): Promise<ConvertResult> {
   if (!looksLikeDocx(input)) throw new NotADocx();
 
@@ -112,8 +133,6 @@ export async function docxToPdf(
   if (!blocks.length) {
     throw new NotADocx('That document appears to be empty — there is no text or image to convert.');
   }
-
-  const unsupported = unsupportedCharacters(blocks);
 
   /* ---- appearance mammoth discards, read straight from the document ---- */
 
@@ -154,12 +173,34 @@ export async function docxToPdf(
   const pdf = await PDFDocument.create();
   pdf.setProducer('nikhilkhilwani.github.io/tools/word-to-pdf');
 
-  const fonts = {
-    regular: await pdf.embedFont(StandardFonts.TimesRoman),
-    bold: await pdf.embedFont(StandardFonts.TimesRomanBold),
-    italic: await pdf.embedFont(StandardFonts.TimesRomanItalic),
-    boldItalic: await pdf.embedFont(StandardFonts.TimesRomanBoldItalic),
-  };
+  // Only the faces the document actually uses get fetched: a document with no
+  // italics never pays for the italic file.
+  const runFlags: { bold?: boolean; italic?: boolean }[] = [];
+  for (const block of blocks) {
+    if (block.kind === 'table') {
+      for (const row of block.rows) for (const cell of row) runFlags.push(...cell.runs);
+    } else if (block.kind === 'heading' || block.kind === 'paragraph' || block.kind === 'listItem') {
+      runFlags.push(...block.runs);
+    }
+  }
+
+  const metric = await loadMetricFonts(pdf, needsFromFlags(runFlags), fontSource);
+
+  const fonts = metric
+    ? metric.faces
+    : {
+        // Fallback only. WinAnsi-encoded, and metrics unlike Word's — this is
+        // what every conversion looked like before fonts.ts existed.
+        regular: await pdf.embedFont(StandardFonts.TimesRoman),
+        bold: await pdf.embedFont(StandardFonts.TimesRomanBold),
+        italic: await pdf.embedFont(StandardFonts.TimesRomanItalic),
+        boldItalic: await pdf.embedFont(StandardFonts.TimesRomanBoldItalic),
+      };
+
+  // Asked of the embedded font directly when there is one, so the warning
+  // reflects what can really be drawn rather than assuming the WinAnsi set.
+  const unsupported = unsupportedCharacters(blocks, metric?.hasGlyph);
+
   const pick = (bold: boolean, italic: boolean) =>
     bold && italic ? fonts.boldItalic : bold ? fonts.bold : italic ? fonts.italic : fonts.regular;
 
@@ -305,6 +346,7 @@ export async function docxToPdf(
     styled,
     unstyled,
     pageSetup,
+    metricFonts: metric !== null,
   };
 }
 
@@ -327,9 +369,17 @@ export function describeConversion(result: ConvertResult): string {
 
   if (result.unsupported.length) {
     const shown = result.unsupported.slice(0, 6).join(' ');
+    // The reason differs by path, and saying the wrong one sends people looking
+    // for a fix that does not exist.
+    const why = result.metricFonts
+      ? 'the embedded font covers Latin, Latin-extended, Cyrillic and Greek — other scripts need shaping this tool cannot do'
+      : 'the font files could not be loaded, so the built-in fonts were used and those cover Latin only';
     parts.push(
-      `${result.unsupported.length} character${result.unsupported.length === 1 ? '' : 's'} could not be drawn (${shown}) and became "?" — the built-in PDF fonts cover Latin only.`,
+      `${result.unsupported.length} character${result.unsupported.length === 1 ? '' : 's'} could not be drawn (${shown}) and became "?" — ${why}.`,
     );
+  }
+  if (!result.metricFonts) {
+    parts.push('Line breaks may differ from Word: the metric-compatible fonts did not load.');
   }
   if (result.styled) {
     parts.push(
@@ -351,10 +401,10 @@ export function describeConversion(result: ConvertResult): string {
 }
 
 export const LAYOUT_CAVEATS = [
-  'Line breaks will not match Word exactly — Word measures with Calibri and Cambria, which cannot be redistributed',
   'Font colours and highlighting are not carried over, and a paragraph mixing sizes takes its first size',
   'Headers, footers, page numbers, footnotes and explicit page breaks are not carried over',
   'Columns, text boxes, shapes and vertically merged cells are not reproduced',
+  'Hindi, Arabic, Thai and other scripts needing complex shaping cannot be drawn — they are reported, not silently mangled',
 ] as const;
 
 export type { Block };

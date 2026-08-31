@@ -1,0 +1,68 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PageHead from '../components/PageHead.astro';
+import Icon from '../components/Icon.astro';
+import { profile, certifications } from '../data/profile';
+---
+
+<BaseLayout
+  title={`Certifications — ${profile.name}`}
+  description={`Certifications and credentials held by ${profile.name}.`}
+>
+  <div class="shell">
+    <PageHead
+      eyebrow="Certifications"
+      title="Credentials"
+      lede={certifications.length ? 'Most recent first.' : undefined}
+    />
+
+    {
+      certifications.length > 0 ? (
+        <ul class="tl">
+          {certifications.map((cert) => (
+            <li class="panel">
+              <div class="tl__head">
+                <h2 class="tl__title">{cert.name}</h2>
+                <span class="tl__org">{cert.issuer}</span>
+                {cert.issued && <span class="tl__meta">{cert.issued}</span>}
+              </div>
+              {cert.credentialUrl && (
+                <p class="cert__verify">
+                  <a href={cert.credentialUrl} target="_blank" rel="noopener">
+                    Verify credential <Icon name="arrow" size={13} />
+                  </a>
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <div class="panel empty">
+          <strong>Nothing listed here yet.</strong>
+          <p>
+            This page is left empty on purpose — a credential is only worth showing
+            if it is real and verifiable. It will fill up as they land.
+          </p>
+          <a class="btn btn--solid btn--sm" href="/about">
+            More about me <Icon name="arrow" size={14} />
+          </a>
+        </div>
+      )
+    }
+  </div>
+</BaseLayout>
+
+<style>
+  .cert__verify { margin: 0.75rem 0 0; font-size: 0.84rem; }
+  .cert__verify a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    color: var(--ink-dim);
+    text-decoration: none;
+    border-bottom: 1px solid var(--line-strong);
+    padding-bottom: 1px;
+  }
+  .cert__verify a:hover { color: var(--accent); }
+  .empty p { margin: 0; max-width: 58ch; }
+</style>

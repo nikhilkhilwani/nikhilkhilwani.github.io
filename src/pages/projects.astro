@@ -1,0 +1,129 @@
+---
+import BaseLayout from '../layouts/BaseLayout.astro';
+import PageHead from '../components/PageHead.astro';
+import Icon from '../components/Icon.astro';
+import { profile, projects } from '../data/profile';
+import { availableTools } from '../data/tools';
+
+const lead = projects.find((p) => p.featured);
+const rest = projects.filter((p) => p !== lead);
+---
+
+<BaseLayout
+  title={`Projects — ${profile.name}`}
+  description={`Things ${profile.name} has built, and how they were built.`}
+>
+  <div class="shell">
+    <PageHead
+      eyebrow="Projects"
+      title="Things I have built"
+      lede="Each one solves a problem I actually had. All of it is live and free to use."
+    />
+
+    <div class="stack">
+      {
+        lead && (
+          <article class="panel lead">
+            <p class="eyebrow">Featured</p>
+            <h2 class="lead__name">{lead.name}</h2>
+            <p class="lead__blurb">{lead.blurb}</p>
+            <ul class="chips">
+              {lead.stack.map((s) => <li class="chip">{s}</li>)}
+            </ul>
+            <p class="lead__count">
+              {availableTools.length} tools live right now — nothing is uploaded anywhere.
+            </p>
+            <div class="lead__cta">
+              {lead.href && (
+                <a class="btn btn--solid btn--sm" href={lead.href}>
+                  Open the toolbox <Icon name="arrow" size={14} />
+                </a>
+              )}
+              {lead.repo && (
+                <a class="btn btn--sm" href={lead.repo} target="_blank" rel="noopener">
+                  Source
+                </a>
+              )}
+            </div>
+          </article>
+        )
+      }
+
+      {
+        rest.length > 0 && (
+          <section>
+            <h2 class="shead">Also</h2>
+            <ul class="more">
+              {rest.map((p) => (
+                <li class="panel">
+                  <div class="more__head">
+                    <h3 class="tl__title">{p.name}</h3>
+                    {p.year && <span class="tl__meta">{p.year}</span>}
+                  </div>
+                  <p class="tl__body">{p.blurb}</p>
+                  <ul class="chips more__stack">
+                    {p.stack.map((s) => <li class="chip">{s}</li>)}
+                  </ul>
+                  {(p.href || p.repo) && (
+                    <div class="more__cta">
+                      {p.href && (
+                        <a href={p.href}>
+                          Visit <Icon name="arrow" size={13} />
+                        </a>
+                      )}
+                      {p.repo && (
+                        <a href={p.repo} target="_blank" rel="noopener">
+                          Source <Icon name="arrow" size={13} />
+                        </a>
+                      )}
+                    </div>
+                  )}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )
+      }
+    </div>
+  </div>
+</BaseLayout>
+
+<style>
+  .lead { display: grid; gap: 0.85rem; }
+  .lead__name {
+    font-family: var(--serif);
+    font-weight: 400;
+    font-size: clamp(1.5rem, 4vw, 2rem);
+    letter-spacing: -0.015em;
+    margin: 0;
+  }
+  .lead__blurb {
+    margin: 0;
+    color: var(--ink-dim);
+    line-height: 1.75;
+    max-width: 68ch;
+  }
+  .lead__count {
+    margin: 0;
+    font-family: var(--mono);
+    font-size: 0.78rem;
+    color: var(--ink-faint);
+  }
+  .lead__cta { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 0.35rem; }
+
+  .more { list-style: none; margin: 0; padding: 0; display: grid; gap: clamp(14px, 2.4vw, 20px); }
+  .more__head { display: flex; flex-wrap: wrap; gap: 0.25rem 0.9rem; align-items: baseline; }
+  .more__head .tl__meta { margin-inline-start: auto; }
+  .more__stack { margin-top: 0.95rem; }
+  .more__cta { display: flex; flex-wrap: wrap; gap: 1.1rem; margin-top: 0.9rem; }
+  .more__cta a {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    font-size: 0.84rem;
+    color: var(--ink-dim);
+    text-decoration: none;
+    min-height: 44px;
+  }
+  .more__cta a:hover { color: var(--accent); }
+</style>
