@@ -47,6 +47,11 @@ export interface FurnitureRefs {
   headerFirst?: string;
   footerFirst?: string;
   titlePg: boolean;
+  /** Distinct even-page parts, used only when settings.xml enables them. */
+  headerEven?: string;
+  footerEven?: string;
+  /** True when word/settings.xml declares w:evenAndOddHeaders. */
+  evenAndOdd: boolean;
   /** Distance from the top edge of the page to the header, in points. */
   headerDistance: number;
   /** Distance from the bottom edge of the page to the footer, in points. */
@@ -68,12 +73,22 @@ export function readRelationships(relsXml: string): Map<string, string> {
 }
 
 /** Reads the header/footer references out of the first section. */
-export function readFurnitureRefs(documentXml: string, relsXml: string): FurnitureRefs {
+export function readFurnitureRefs(
+  documentXml: string,
+  relsXml: string,
+  settingsXml?: string,
+): FurnitureRefs {
   const rels = readRelationships(relsXml);
   const sect = /<w:sectPr\b[^>]*>[\s\S]*?<\/w:sectPr>/.exec(documentXml)?.[0] ?? '';
 
   const refs: FurnitureRefs = {
     titlePg: /<w:titlePg\b(?![^>]*w:val\s*=\s*"(?:0|false)")/.test(sect),
+    // Even-page parts are inert unless the document setting turns them on.
+    // Honouring the reference without checking would put the even header on
+    // every other page of a document that never asked for one.
+    evenAndOdd: settingsXml
+      ? /<w:evenAndOddHeaders\b(?![^>]*w:val\s*=\s*"(?:0|false)")/.test(settingsXml)
+      : false,
     headerDistance: 0,
     footerDistance: 0,
   };
@@ -87,13 +102,20 @@ export function readFurnitureRefs(documentXml: string, relsXml: string): Furnitu
 
     if (kind === 'header') {
       if (type === 'first') refs.headerFirst = part;
+      else if (type === 'even') refs.headerEven = part;
       else if (type === 'default') refs.header = part;
     } else {
       if (type === 'first') refs.footerFirst = part;
+      else if (type === 'even') refs.footerEven = part;
       else if (type === 'default') refs.footer = part;
     }
-    // "even" is ignored: it only applies with the evenAndOddHeaders setting,
-    // and using it without that check would put it on every other page.
+  }
+
+  // Recorded but unusable without the setting, so drop them here rather than
+  // leaving a trap for the caller.
+  if (!refs.evenAndOdd) {
+    refs.headerEven = undefined;
+    refs.footerEven = undefined;
   }
 
   const pgMar = /<w:pgMar\b[^>]*\/?>/.exec(sect)?.[0] ?? '';
@@ -216,7 +238,16 @@ export interface FurnitureBlock {
  * run of text.
  */
 export function parseFurniture(xml: string, page: number, total: number): FurnitureBlock[] {
-  const resolved = substituteFields(xml, page, total);
+  return parseParagraphBlocks(substituteFields(xml, page, total));
+}
+
+/**
+ * Paragraphs, runs, alignment and tab stops out of any Word XML fragment.
+ *
+ * Shared by headers, footers and text boxes: all three are content mammoth
+ * never sees, and all three are paragraph-shaped.
+ */
+export function parseParagraphBlocks(resolved: string): FurnitureBlock[] {
   const out: FurnitureBlock[] = [];
 
   // Only the top-level body paragraphs. A paragraph inside a table would be
@@ -240,6 +271,56 @@ export function parseFurniture(xml: string, page: number, total: number): Furnit
     tabs.sort((a, b) => a.pos - b.pos);
 
     out.push({ block: { kind: 'paragraph', runs }, align, tabs });
+  }
+
+  return out;
+}
+
+/** One text box's content and the text of the paragraph it is anchored in. */
+export interface TextBox {
+  blocks: FurnitureBlock[];
+  /**
+   * Plain text of the nearest preceding paragraph that had any, used to place
+   * the content back near where it came from.
+   */
+  afterText: string;
+}
+
+/**
+ * Text boxes, in document order.
+ *
+ * These are <w:txbxContent> inside an mc:AlternateContent drawing, and mammoth
+ * emits nothing at all for them — so a template built out of text boxes
+ * currently converts to a nearly empty PDF. Reproducing their absolute position
+ * would need a floating-layout concept the engine does not have, so the content
+ * is put into the flow instead: the wrong position, but present and readable,
+ * which beats losing it.
+ */
+export function readTextBoxes(documentXml: string): TextBox[] {
+  // The Fallback branch repeats the same content in VML, so drop it first or
+  // every text box would be found twice.
+  const primary = documentXml.replace(/<mc:Fallback>[\s\S]*?<\/mc:Fallback>/g, '');
+  const out: TextBox[] = [];
+
+  const boxPattern = /<w:txbxContent\b[^>]*>([\s\S]*?)<\/w:txbxContent>/g;
+  let match: RegExpExecArray | null;
+  while ((match = boxPattern.exec(primary)) !== null) {
+    const blocks = parseParagraphBlocks(match[1]);
+    if (!blocks.length) continue;
+
+    // Everything before this box, with the box's own content removed so its
+    // text cannot be mistaken for the surrounding paragraph's.
+    const before = primary.slice(0, match.index).replace(/<w:txbxContent\b[^>]*>[\s\S]*?<\/w:txbxContent>/g, '');
+    let afterText = '';
+    for (const paragraph of before.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []) {
+      const text = (paragraph.match(/<w:t\b[^>]*>([\s\S]*?)<\/w:t>/g) ?? [])
+        .map((token) => /<w:t\b[^>]*>([\s\S]*?)<\/w:t>/.exec(token)?.[1] ?? '')
+        .join('')
+        .trim();
+      if (text) afterText = text;
+    }
+
+    out.push({ blocks, afterText });
   }
 
   return out;

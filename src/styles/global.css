@@ -1,62 +1,70 @@
 /* Design tokens — extended from the original coming-soon page so the tools
    section reads as the same site rather than a bolted-on app. */
 :root {
-  /* Phosphor: a CRT terminal. Green on near-black, one typeface, hard corners.
-     Colour is only part of it — the look comes as much from the type and the
-     geometry below, which is why the previous two dark palettes read as the
-     same site wearing a different tint.
-     Every text pair is checked against WCAG; the weakest is --ink-faint on
-     --surface at 3.86. */
-  --bg: #060a07;
-  --surface: #0d140f;
-  --surface-2: #152018;
-  --ink: #cfe8d5;
-  --ink-dim: #86a68e;
-  --ink-faint: #5d7864;
+  /* Blueprint: light, Swiss, technical. Grey ground, white panels, hard 1px
+     rules, zero radius, no serif anywhere.
+     This is the first LIGHT theme this site has had, and the value flip is the
+     point: a dark background is ~90% of the pixels on screen, so every previous
+     re-tint measured under 0.07 ΔE and read as the same site. This measures
+     0.82 — the only class of change that actually lands.
+     All 19 text pairs are checked against WCAG; the weakest is --ink-faint on
+     --surface-2 at 3.62. */
+  --bg: #eef1f4;
+  --surface: #ffffff;
+  --surface-2: #e2e7ec;
+  --ink: #0b0f14;
+  --ink-dim: #48525c;
+  --ink-faint: #6d7883;
   --accent: rgb(var(--accent-rgb));
-  --accent-ink: #04170a;
-  --warn: #f7d774;
-  --bad: #ff8a80;
-  /* Success IS the accent here — on a phosphor display there is only one
-     "good" colour, and inventing a second green would read as a bug. */
-  --good: rgb(var(--accent-rgb));
-  /* Rules glow rather than sit neutral: green-tinted, at the alpha that matches
-     the previous palette's visibility against this much darker base. */
-  --line: rgb(var(--accent-rgb) / 0.095);
-  --line-strong: rgb(var(--accent-rgb) / 0.175);
+  --accent-ink: #ffffff;
+  /* Darkened from the dark themes' pastels: a pale status colour that read
+     clearly on near-black is invisible on white. These are the same three
+     semantics re-picked for a light ground, each ≥5.2 on both bg and surface. */
+  --warn: #8a5a00;
+  --bad: #b3261e;
+  --good: #1f6b3a;
+  /* Rules are now dark-on-light, and deliberately stronger than the dark
+     themes' whisper: Swiss layout is held together by visible 1px rules, so
+     this is a design choice rather than a parity target. */
+  --line: rgba(11, 15, 20, 0.18);
+  --line-strong: rgba(11, 15, 20, 0.32);
 
   /* Channels, not a colour: translucent washes of the accent are written
      `rgb(var(--accent-rgb) / 0.06)`, which a plain `var(--accent)` cannot
      express. Without this the accent has to be hardcoded at every tint site,
      and re-theming leaves the old hue behind icon tiles and checked radios. */
-  --accent-rgb: 87 242 135;
+  --accent-rgb: 29 78 216;
 
-  /* The faint washes that lift a surface off the background. Lowered from the
-     grey palette: the base is far darker now, so an identical overlay reads
-     stronger. Kept neutral white — tinting these green as well turned every
-     panel sickly. */
-  --lift-1: rgba(255, 255, 255, 0.030);
-  --lift-2: rgba(255, 255, 255, 0.045);
-  --lift-3: rgba(255, 255, 255, 0.080);
+  /* On a dark ground these were near-transparent white. On a near-white ground
+     there is almost no headroom left to white, so the same alphas produced no
+     visible panel at all — they are raised hard here to carry a panel from the
+     grey ground up to white, which is what the Swiss look is built on.
+     Composited: panel top #fdfefe, bottom #f7f9fa, over the #eef1f4 ground. */
+  --lift-1: rgba(255, 255, 255, 0.55);
+  --lift-2: rgba(255, 255, 255, 0.90);
+  /* Was --lift-3, renamed because it is not a lift: it is only ever the
+     unfilled part of a progress track. On a dark theme a track recedes by
+     going lighter, on a light theme by going darker — so it is the one layer
+     whose polarity flips, and calling it a "lift" invited exactly the bug where
+     a light theme sets all three white and the track disappears. */
+  --well: rgba(11, 15, 20, 0.10);
 
-  /* One typeface, everywhere. --serif and --sans deliberately resolve to the
-     same mono stack rather than being deleted: every existing rule keeps
-     working, and pointing all three back at different families is all it takes
-     to undo this. Long prose is the tradeoff — it is why every measure on the
-     site is capped at 60–68ch. */
-  --serif: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-  --sans: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  /* No serif anywhere. Archivo carries headings at 700 with tight tracking —
+     that loss of the serif is what changes the site's voice more than any
+     palette could. --serif is kept as a name (34 rules reference these three)
+     but resolves to the grotesk; JetBrains Mono is demoted to labels and data,
+     where a fixed advance actually helps. */
+  --serif: "Archivo", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  --sans: "Archivo", system-ui, -apple-system, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   --mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
 
   --pad-x: clamp(24px, 6vw, 80px);
   --pad-y: clamp(20px, 4vw, 32px);
-  /* Hard corners. A terminal has no radius; 2px keeps borders from looking
-     accidentally jagged where two rules meet. */
-  --r: 2px;
-  --r-sm: 2px;
-  /* Was a hardcoded 999px in ten places — pills are the single most
-     un-terminal shape on the site, so the radius is a token now. */
-  --r-pill: 2px;
+  /* Zero, not 2px. Swiss has no radius at all, and on a light ground there is
+     no soft glow to hide a hard corner behind. */
+  --r: 0px;
+  --r-sm: 0px;
+  --r-pill: 0px;
   --shell: 1120px;
 }
 
@@ -72,6 +80,10 @@
 [hidden] { display: none !important; }
 
 html {
+  /* Never declared before. Native scrollbars, <select> popups and date pickers
+     take their chrome from this — on the old dark themes they rendered light
+     and wrong; now light is actually correct. */
+  color-scheme: light;
   -webkit-text-size-adjust: 100%;
   scroll-behavior: smooth;
   /* The canvas is painted here as well as on body. Redundant by design: a
@@ -91,7 +103,9 @@ body {
   color: var(--ink);
   font-family: var(--sans);
   font-weight: 400;
-  -webkit-font-smoothing: antialiased;
+  /* No -webkit-font-smoothing: antialiased here. It thins strokes, which helps
+     light text on a dark ground and actively hurts dark text on a light one —
+     it was correct for every previous theme and is wrong for this one. */
   display: grid;
   grid-template-rows: auto 1fr auto;
   overflow-x: hidden;
@@ -99,11 +113,12 @@ body {
 
 h1, h2, h3 {
   font-family: var(--serif);
-  /* Mono at 300 is spindly light-on-dark, and negative tracking fights a fixed
-     advance width — so weight up and let the grid breathe. */
-  font-weight: 500;
-  letter-spacing: 0;
-  line-height: 1.15;
+  /* Swiss display setting: heavy and tightly tracked. A grotesk at 700 with
+     -0.035em is the whole voice change — it is doing more work here than the
+     palette is. */
+  font-weight: 700;
+  letter-spacing: -0.035em;
+  line-height: 1.05;
   margin: 0;
 }
 
@@ -112,7 +127,7 @@ a { color: inherit; }
 :where(a, button, input, select, textarea, [tabindex]):focus-visible {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
-  border-radius: 4px;
+  border-radius: var(--r-sm);
 }
 
 .shell {
@@ -131,6 +146,7 @@ a { color: inherit; }
 }
 
 .eyebrow {
+  font-family: var(--mono);
   font-size: 0.7rem;
   letter-spacing: 0.16em;
   text-transform: uppercase;
@@ -152,6 +168,7 @@ a { color: inherit; }
   gap: 0.45rem;
 }
 .field > label {
+  font-family: var(--mono);
   font-size: 0.76rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;

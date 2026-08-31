@@ -46,6 +46,10 @@ export interface Cell {
    * later rows have fewer cells because earlier ones still occupy the column.
    */
   rowSpan?: number;
+  /** Paragraph properties for the cell, attached later from word/document.xml. */
+  align?: 'left' | 'center' | 'right' | 'justify';
+  spaceBefore?: number;
+  spaceAfter?: number;
 }
 
 export type Block =
@@ -418,6 +422,12 @@ export function parseBlocks(html: string): Block[] {
           if (tag.closing) {
             if (!cell) flush();
           } else if (!cell) {
+            // A <p> opening directly inside an <li> is that item's own
+            // paragraph. The generic path below would flush the empty listItem
+            // and replace it with a plain paragraph, throwing the list marker
+            // away — which is exactly how mammoth's footnote list lost its
+            // numbers, leaving notes with no way to tell which was which.
+            if (current?.kind === 'listItem' && !runs.length) break;
             flush();
             current = { kind: 'paragraph' };
           }

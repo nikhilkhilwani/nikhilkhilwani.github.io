@@ -61,6 +61,8 @@ export interface ParagraphProps {
   styleId?: string;
   /** This paragraph starts a new page. */
   pageBreakBefore?: boolean;
+  /** w:bidi — the paragraph's base direction is right-to-left. */
+  rtl?: boolean;
   /** Per-run colour, highlight and size, with offsets into `runText`. */
   runSpans?: RunSpan[];
   /** The paragraph's raw text, which the spans index into. */
@@ -241,6 +243,9 @@ export function readParagraphProps(
     // <w:contextualSpacing/> is on; an explicit w:val="0" turns it off again.
     const ctx = /<w:contextualSpacing\b([^>]*)\/?>/.exec(pPr);
     if (ctx && !/w:val\s*=\s*"(0|false)"/.test(ctx[1])) props.contextualSpacing = true;
+
+    const bidi = /<w:bidi\b([^>]*)\/?>/.exec(pPr);
+    if (bidi && !/w:val\s*=\s*"(0|false)"/.test(bidi[1])) props.rtl = true;
 
     // Size: half-points, taken from the paragraph mark or its first run. A
     // paragraph mixing sizes therefore takes its first run's — reading every
@@ -480,7 +485,7 @@ export interface StyleDefs {
 }
 
 /** Reads the <w:spacing>/<w:jc>/<w:ind> shape shared by styles and paragraphs. */
-function readSpacingLike(pPr: string): StyleProps {
+export function readSpacingLike(pPr: string): StyleProps {
   const out: StyleProps = {};
 
   const jc = attrOf(pPr, 'w:jc');

@@ -11,7 +11,8 @@
 
 import type { Block, Cell, Run } from './blocks.ts';
 import type { Align, TabStop } from './wordxml.ts';
-import { LATIN, segmentByScript } from './scripts.ts';
+import { LATIN, RTL_SCRIPTS, segmentByScript } from './scripts.ts';
+import { reorderTokens } from './bidi.ts';
 
 /** Width of `text` at `size` in the given style. Supplied by the renderer. */
 export type Measure = (
@@ -128,6 +129,12 @@ export interface LayoutOptions {
   insetTop?: number;
   insetBottom?: number;
   /**
+   * A loaded bidi-js instance. Without it right-to-left lines stay in logical
+   * order, which is what shipped before. Supplied by topdf.ts, which can await
+   * the dynamic import that layout() cannot.
+   */
+  bidi?: Parameters<typeof reorderTokens>[0];
+  /**
    * Appearance read from word/document.xml, keyed by block. Absent entries
    * simply fall back to the defaults, so a correlation miss is harmless.
    */
@@ -150,6 +157,8 @@ export interface BlockAppearance {
   contextualSpacing?: boolean;
   /** Start this block on a fresh page. */
   pageBreakBefore?: boolean;
+  /** The paragraph's base direction is right-to-left. */
+  rtl?: boolean;
   /** Overrides the type scale for this block. */
   size?: number;
   /** Left indent in points. */
@@ -192,6 +201,7 @@ export function wrapRuns(
   width: number,
   measure: Measure,
   tabs: TabStop[] = [],
+  direction?: { bidi?: Parameters<typeof reorderTokens>[0]; rtl?: boolean },
 ): Line[] {
   const lines: Line[] = [];
   let pieces: Piece[] = [];
@@ -199,6 +209,21 @@ export function wrapRuns(
 
   const flush = () => {
     while (pieces.length && /^ +$/.test(pieces[pieces.length - 1].text)) pieces.pop();
+
+    // Visual reordering for right-to-left text. Tokens are laid out in logical
+    // order above, which puts Arabic and Hebrew WORDS backwards even when every
+    // word is shaped correctly on its own.
+    if (direction?.bidi && (direction.rtl || pieces.some((piece) => RTL_SCRIPTS.has(piece.font)))) {
+      const { order } = reorderTokens(direction.bidi, pieces, direction.rtl ? 'rtl' : 'auto');
+      const visual = order.map((index) => pieces[index]);
+      let cursor = 0;
+      for (const piece of visual) {
+        piece.x = cursor;
+        cursor += piece.width;
+      }
+      pieces = visual;
+    }
+
     // Height follows the tallest piece. Normally every piece is the paragraph
     // size (super/subscript are smaller), so this changes nothing unless a run
     // declared a larger size of its own.
@@ -560,24 +585,34 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
       // tallest piece rather than the body size. Identical to cellLine for
       // ordinary cells.
       const advanceOf = (line: Line) => Math.max(cellLine, line.height * scale.lineHeight);
-      const heightOf = (lines: Line[]) =>
-        lines.reduce((total, line) => total + advanceOf(line), 0) + padding * 2;
+      const heightOf = (lines: Line[], cell?: Cell) =>
+        lines.reduce((total, line) => total + advanceOf(line), 0) +
+        padding * 2 +
+        (cell?.spaceBefore ?? 0) +
+        (cell?.spaceAfter ?? 0);
 
       /* --- size the rows --- */
 
       const rowHeights = new Array<number>(rowCount).fill(cellLine + padding * 2);
       for (const item of placed) {
         const width = spanWidth(widths, item.start, item.span, gap);
-        item.lines = wrapRuns(item.cell.runs, scale.body, width - padding * 2, measure);
+        const inner = width - padding * 2;
+        // Cell text used to be left-aligned whatever the document said.
+        const wrapped = wrapRuns(item.cell.runs, scale.body, inner, measure, [], {
+          bidi: options.bidi,
+        });
+        item.lines = wrapped.map((line, i) =>
+          alignLine(line, item.cell.align ?? 'left', inner, i === wrapped.length - 1),
+        );
         if (item.rowSpan === 1) {
-          rowHeights[item.row] = Math.max(rowHeights[item.row], heightOf(item.lines));
+          rowHeights[item.row] = Math.max(rowHeights[item.row], heightOf(item.lines, item.cell));
         }
       }
       // A spanning cell taller than the rows it covers grows the last of them,
       // which is what keeps its text inside its own box.
       for (const item of placed) {
         if (item.rowSpan === 1) continue;
-        const need = heightOf(item.lines);
+        const need = heightOf(item.lines, item.cell);
         let have = 0;
         for (let rr = item.row; rr < item.row + item.rowSpan; rr++) have += rowHeights[rr];
         if (need > have) rowHeights[item.row + item.rowSpan - 1] += need - have;
@@ -619,7 +654,7 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
 
           const cellTop = top - offset[item.row];
           items.push({ kind: 'cellBox', x, y: cellTop - height, width, height });
-          let ty = cellTop - padding - Math.max(scale.body, item.lines[0]?.height ?? 0);
+          let ty = cellTop - padding - (item.cell.spaceBefore ?? 0) - Math.max(scale.body, item.lines[0]?.height ?? 0);
           for (const line of item.lines) {
             items.push({ kind: 'line', x: x + padding, y: ty, line });
             ty -= advanceOf(line);
@@ -674,10 +709,14 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
       .map((t) => ({ ...t, pos: t.pos - indent }))
       .filter((t) => t.pos > 0);
 
-    const wrapped = wrapRuns(block.runs, size, available, measure, tabs);
+    const wrapped = wrapRuns(block.runs, size, available, measure, tabs, {
+      bidi: options.bidi,
+      rtl: look.rtl,
+    });
     if (!wrapped.length) continue;
 
-    const align: Align = look.align ?? 'left';
+    // A right-to-left paragraph starts at the right margin unless it says otherwise.
+    const align: Align = look.align ?? (look.rtl ? 'right' : 'left');
     const lines = wrapped.map((line, i) =>
       alignLine(line, align, available, i === wrapped.length - 1),
     );

@@ -220,6 +220,12 @@ export function applyRunSpans(runs: Run[], raw: string, spans: RunSpan[]): Run[]
 export interface CellRuns {
   text: string;
   spans: RunSpan[];
+  /**
+   * The raw <w:pPr> of the cell's first paragraph. Handed back rather than
+   * parsed here: the parser for it lives in wordxml.ts, which already imports
+   * this module, so reading it here would close an import cycle.
+   */
+  pPr: string;
 }
 
 /**
@@ -254,6 +260,7 @@ export function readTableCellRuns(documentXml: string): CellRuns[][][] {
 
         let text = '';
         const spans: RunSpan[] = [];
+        let pPr = '';
         for (const paragraph of tc.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []) {
           const read = readRunSpans(paragraph);
           const shift = text.length;
@@ -261,8 +268,11 @@ export function readTableCellRuns(documentXml: string): CellRuns[][][] {
             spans.push({ ...span, start: span.start + shift, end: span.end + shift });
           }
           text += read.text;
+          // The first paragraph's properties stand for the cell, since a cell
+          // is flattened into one run list downstream.
+          if (!pPr) pPr = /<w:pPr\b[^>]*>([\s\S]*?)<\/w:pPr>/.exec(paragraph)?.[1] ?? '';
         }
-        cells.push({ text, spans });
+        cells.push({ text, spans, pPr });
       }
 
       rows.push(cells);

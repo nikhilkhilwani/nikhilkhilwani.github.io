@@ -25,7 +25,7 @@ import { protectPdf, classifyPasswordError, inspectEncryption } from '../src/lib
 import { unlockPdf } from '../src/lib/pdf/unlock.ts';
 import { recompressImages, flattenToImages, percentSaved, estimateRecompress, describeEstimate } from '../src/lib/pdf/compress.ts';
 import sharp from 'sharp';
-import { zipSync, strToU8 } from 'fflate';
+import { zipSync, unzipSync, strToU8 } from 'fflate';
 import { docxToPdf as docxToPdfRaw, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
 import { readFile as readFileFs } from 'node:fs/promises';
 import { join as joinPath } from 'node:path';
@@ -724,9 +724,15 @@ const plain = await makePlain();
   eq(multi.unsupported.length, 0, 'word: four scripts, nothing undrawable');
   eq(multi.scripts.length, 4, `word: all four scripts reported (${multi.scripts.join(', ')})`);
   eq(multi.rtl, true, 'word: the Arabic makes the result flag right-to-left');
+  // This used to assert the opposite — that the summary admitted there was no
+  // bidi. Reordering is implemented now, so the old wording would be a lie.
   ok(
-    describeConversion(multi).includes('logical order'),
-    'word: the summary admits there is no bidi rather than implying correct RTL layout',
+    describeConversion(multi).includes('reordered for display'),
+    'word: the summary reports that right-to-left text is reordered',
+  );
+  ok(
+    !describeConversion(multi).includes('logical order'),
+    'word: and no longer claims logical order',
   );
 
   /* --- a script font that cannot be loaded is reported, not silently wrong --- */
@@ -1321,6 +1327,130 @@ const plain = await makePlain();
   ok(!firstPage.includes('RUNNINGHEAD'), 'word: and not the default one');
   ok(laterPage.includes('RUNNINGHEAD'), 'word: page 2 uses the default header');
   ok(!laterPage.includes('TITLEPAGEHEAD'), 'word: and not the first-page one');
+
+  /* even and odd headers */
+
+  const EVEN = `<w:hdr ${NSW}><w:p><w:r><w:t>EVENPAGEHEAD</w:t></w:r></w:p></w:hdr>`;
+
+  // Without the settings part the even reference must stay inert.
+  const noSetting = await docxToPdf(
+    withParts(
+      longBody +
+        sectWith(
+          '<w:headerReference r:id="rid_header1" w:type="default"/>' +
+            '<w:headerReference r:id="rid_header2" w:type="even"/>',
+        ),
+      { header1: HEADER, header2: EVEN },
+    ),
+  );
+  const nsItems = await itemsOf(noSetting.bytes);
+  ok(
+    !nsItems.some((i) => i.str.includes('EVENPAGEHEAD')),
+    'word: an even header is ignored without w:evenAndOddHeaders',
+  );
+
+  // With it, even pages swap.
+  const evenOdd = zipSync({
+    ...Object.fromEntries(
+      Object.entries(
+        unzipSync(
+          withParts(
+            longBody +
+              sectWith(
+                '<w:headerReference r:id="rid_header1" w:type="default"/>' +
+                  '<w:headerReference r:id="rid_header2" w:type="even"/>',
+              ),
+            { header1: HEADER, header2: EVEN },
+          ),
+        ),
+      ),
+    ),
+    'word/settings.xml': strToU8(
+      `<?xml version="1.0"?><w:settings ${NSW}><w:evenAndOddHeaders/></w:settings>`,
+    ),
+  });
+  const swapped = await docxToPdf(evenOdd);
+  const eoItems = await itemsOf(swapped.bytes);
+  const textOnPage = (n) => eoItems.filter((i) => i.page === n).map((i) => i.str).join('');
+  ok(swapped.pages >= 2, `word: the even/odd document runs to ${swapped.pages} pages`);
+  ok(textOnPage(1).includes('RUNNINGHEAD'), 'word: page 1 (odd) uses the default header');
+  ok(textOnPage(2).includes('EVENPAGEHEAD'), 'word: page 2 (even) uses the even header');
+  ok(!textOnPage(2).includes('RUNNINGHEAD'), 'word: and not the default one');
+  if (swapped.pages >= 3) {
+    ok(textOnPage(3).includes('RUNNINGHEAD'), 'word: page 3 (odd) is back to the default header');
+  }
+
+  /* text box content */
+
+  const boxed = await docxToPdf(
+    build(
+      p('Paragraph before the box') +
+        '<w:p><w:r><mc:AlternateContent><mc:Choice><w:drawing><wp:anchor>' +
+        '<wps:txbx><w:txbxContent>' +
+        '<w:p><w:r><w:rPr><w:b/></w:rPr><w:t>BOXEDHEADING</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:t>BOXEDBODY line of text</w:t></w:r></w:p>' +
+        '</w:txbxContent></wps:txbx>' +
+        '</wp:anchor></w:drawing></mc:Choice>' +
+        '<mc:Fallback><w:pict><v:textbox><w:txbxContent>' +
+        '<w:p><w:r><w:t>BOXEDHEADING</w:t></w:r></w:p></w:txbxContent></v:textbox></w:pict></mc:Fallback>' +
+        '</mc:AlternateContent></w:r></w:p>' +
+        p('Paragraph after the box'),
+    ),
+  );
+  eq(boxed.textBoxes, 1, 'word: one text box was lifted into the flow');
+  const boxItems = await itemsOf(boxed.bytes);
+  const boxJoined = boxItems.map((i) => i.str).join(' ');
+  ok(boxJoined.includes('BOXEDHEADING'), 'word: its heading survives instead of vanishing');
+  ok(boxJoined.includes('BOXEDBODY'), 'word: and its body line');
+  // Once, not twice: the Fallback branch repeats the same content.
+  eq(
+    (boxJoined.match(/BOXEDHEADING/g) ?? []).length,
+    1,
+    'word: the text box content appears once, not once per branch',
+  );
+  ok(boxJoined.includes('Paragraph before'), 'word: the surrounding paragraphs are intact');
+  ok(boxJoined.includes('Paragraph after'), 'word: including the one after it');
+
+  /* right-to-left word order */
+
+  // Latin words are the probe, not Arabic ones: a shaped script's glyphs do not
+  // reverse-map cleanly through ToUnicode, so extracted Arabic is unreliable.
+  // With an RTL base direction the two Latin words must come back SWAPPED,
+  // which is exactly what rule L2 does and what logical order would not.
+  const rtlDoc = await docxToPdf(
+    build(
+      '<w:p><w:pPr><w:bidi/></w:pPr>' +
+        '<w:r><w:t xml:space="preserve">Alpha بالعالم Beta</w:t></w:r></w:p>',
+    ),
+  );
+  eq(rtlDoc.rtl, true, 'word: the document reports right-to-left content');
+  // pdf.js coalesces adjacent same-font runs into one item, so piece positions
+  // are not observable here. The DRAWING ORDER is: extraction walks the content
+  // stream left to right, so a reordered line comes back with its words swapped
+  // relative to the source.
+  const rtlText = (await itemsOf(rtlDoc.bytes)).map((i) => i.str).join('');
+  const alpha = rtlText.indexOf('Alpha');
+  const beta = rtlText.indexOf('Beta');
+  ok(alpha >= 0 && beta >= 0, `word: both Latin words survive the RTL line (${JSON.stringify(rtlText)})`);
+  ok(
+    beta < alpha,
+    `word: with an RTL base the line is reordered, so Beta is drawn left of Alpha (${beta} < ${alpha})`,
+  );
+
+  // The same text with no RTL base must stay in logical order, so the
+  // assertion above is testing the reordering and not a coincidence.
+  const ltrDoc = await docxToPdf(
+    build('<w:p><w:r><w:t xml:space="preserve">Alpha Beta gamma</w:t></w:r></w:p>'),
+  );
+  const ltrText = (await itemsOf(ltrDoc.bytes)).map((i) => i.str).join('');
+  ok(
+    ltrText.indexOf('Alpha') < ltrText.indexOf('Beta'),
+    'word: a left-to-right line keeps its order',
+  );
+  ok(
+    describeConversion(rtlDoc).includes('Right-to-left'),
+    'word: the summary still mentions the right-to-left handling',
+  );
 }
 
 

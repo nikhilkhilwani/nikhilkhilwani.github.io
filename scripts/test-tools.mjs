@@ -40,7 +40,10 @@ import {
 } from '../src/lib/docx/runs.ts';
 import {
   readRelationships, readFurnitureRefs, substituteFields, parseFurniture,
+  parseParagraphBlocks, readTextBoxes,
 } from '../src/lib/docx/furniture.ts';
+import { reorderTokens } from '../src/lib/docx/bidi.ts';
+import bidiFactory from 'bidi-js';
 import {
   twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables, readStyles,
 } from '../src/lib/docx/wordxml.ts';
@@ -2106,6 +2109,209 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
 
   const zero = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure, insetTop: 0, insetBottom: 0 });
   eq(JSON.stringify(zero), JSON.stringify(plain), 'zero insets are identical to omitting them');
+}
+
+
+/* ---------------------------------------------------- even and odd headers */
+
+{
+  const rels =
+    '<Relationships>' +
+    '<Relationship Id="hd" Target="header1.xml"/>' +
+    '<Relationship Id="he" Target="header2.xml"/>' +
+    '</Relationships>';
+  const doc =
+    '<w:document><w:body><w:sectPr>' +
+    '<w:headerReference r:id="hd" w:type="default"/>' +
+    '<w:headerReference r:id="he" w:type="even"/>' +
+    '</w:sectPr></w:body></w:document>';
+
+  // Without the document setting the even reference is inert. Honouring it
+  // anyway would put the even header on every other page of a document that
+  // never asked for one.
+  const off = readFurnitureRefs(doc, rels);
+  eq(off.evenAndOdd, false, 'no settings part means no even/odd');
+  eq(off.headerEven, undefined, 'so the even reference is dropped');
+  eq(off.header, 'word/header1.xml', 'while the default survives');
+
+  const on = readFurnitureRefs(doc, rels, '<w:settings><w:evenAndOddHeaders/></w:settings>');
+  eq(on.evenAndOdd, true, 'the setting is read');
+  eq(on.headerEven, 'word/header2.xml', 'and the even reference is kept');
+
+  const disabled = readFurnitureRefs(doc, rels, '<w:settings><w:evenAndOddHeaders w:val="0"/></w:settings>');
+  eq(disabled.evenAndOdd, false, 'w:val="0" turns the setting off');
+  eq(disabled.headerEven, undefined, 'and drops the reference again');
+}
+
+/* ------------------------------------------------------------- text boxes */
+
+{
+  const box = (inner) =>
+    '<w:p><w:r><mc:AlternateContent><mc:Choice><w:drawing><wp:anchor>' +
+    `<wps:txbx><w:txbxContent>${inner}</w:txbxContent></wps:txbx>` +
+    '</wp:anchor></w:drawing></mc:Choice>' +
+    '<mc:Fallback><w:pict><v:textbox><w:txbxContent>' + inner +
+    '</w:txbxContent></v:textbox></w:pict></mc:Fallback>' +
+    '</mc:AlternateContent></w:r></w:p>';
+
+  const doc =
+    '<w:body><w:p><w:r><w:t>Before the box</w:t></w:r></w:p>' +
+    box('<w:p><w:pPr><w:jc w:val="center"/></w:pPr><w:r><w:rPr><w:b/></w:rPr><w:t>BOXED</w:t></w:r></w:p>' +
+        '<w:p><w:r><w:t>Second boxed line</w:t></w:r></w:p>') +
+    '<w:p><w:r><w:t>After the box</w:t></w:r></w:p></w:body>';
+
+  const boxes = readTextBoxes(doc);
+  // The Fallback branch repeats the same content, so counting it would double
+  // every text box in the document.
+  eq(boxes.length, 1, 'an mc:AlternateContent text box is found once, not twice');
+  eq(boxes[0].blocks.length, 2, 'both of its paragraphs are read');
+  eq(boxes[0].blocks[0].align, 'center', 'alignment inside the box is kept');
+  eq(boxes[0].blocks[0].block.runs[0].bold, true, 'and run formatting');
+  eq(boxes[0].afterText, 'Before the box', 'the anchor text is the paragraph before it');
+  eq(
+    boxes[0].blocks.map((b) => b.block.runs.map((r) => r.text).join('')).join('|'),
+    'BOXED|Second boxed line',
+    'the content is complete and in order',
+  );
+
+  eq(readTextBoxes('<w:body><w:p><w:r><w:t>none here</w:t></w:r></w:p></w:body>').length, 0,
+    'a document with no text box yields nothing');
+  eq(readTextBoxes('<w:body>' + box('<w:p/>') + '</w:body>').length, 0,
+    'an empty text box contributes no blocks');
+
+  eq(parseParagraphBlocks('<w:p><w:r><w:t>plain</w:t></w:r></w:p>').length, 1,
+    'parseParagraphBlocks reads a bare fragment');
+}
+
+/* ------------------------------------- a list item whose content is in a <p> */
+
+{
+  // mammoth wraps footnote text as <ol><li><p>…</p></li></ol>. The <p> used to
+  // flush the pending listItem and replace it with a plain paragraph, throwing
+  // the number away — so notes arrived with no way to tell which was which.
+  const blocks = parseBlocks(
+    '<ol><li><p>First note</p></li><li><p>Second note</p></li></ol>',
+  );
+  eq(blocks.length, 2, 'two list items');
+  eq(blocks[0].kind, 'listItem', 'a <li> wrapping a <p> is still a list item');
+  eq(blocks[0].marker, '1.', 'and keeps its number');
+  eq(blocks[1].marker, '2.', 'which increments');
+  ok(blocks.every((b) => b.ordered === true), 'both are ordered');
+
+  // The plain shape must still work.
+  const bare = parseBlocks('<ul><li>Plain item</li></ul>');
+  eq(bare[0].kind, 'listItem', 'a <li> with bare text is unaffected');
+  ok(bare[0].marker.length > 0, 'and still has a bullet');
+
+  // A paragraph outside any list is still a paragraph.
+  const para = parseBlocks('<p>Ordinary</p>');
+  eq(para[0].kind, 'paragraph', 'a top-level <p> is not turned into a list item');
+}
+
+/* --------------------------------------------------- bidi visual reordering */
+
+{
+  const bidi = bidiFactory();
+  const tok = (text) => ({ text });
+
+  // Pure Arabic: wrapRuns tokenises on spaces, so the WORDS came out backwards
+  // even though each word was shaped correctly.
+  const arabic = ['مرحبا', ' ', 'بالعالم', ' ', 'الهند'].map(tok);
+  const { order, baseRtl } = reorderTokens(bidi, arabic, 'rtl');
+  eq(baseRtl, true, 'an RTL base direction is reported');
+  deep(order, [4, 3, 2, 1, 0], 'the tokens are reversed for display');
+
+  // Latin is untouched.
+  const latin = ['Hello', ' ', 'world'].map(tok);
+  deep(reorderTokens(bidi, latin, 'ltr').order, [0, 1, 2], 'left-to-right text keeps its order');
+  eq(reorderTokens(bidi, latin, 'ltr').baseRtl, false, 'and reports an LTR base');
+
+  {
+    // Mixed: the embedded English must stay in reading order inside the
+    // reversed Arabic, which is what rule L2 is for.
+    const mixed = ['مرحبا', ' ', 'Nikhil', ' ', 'بالعالم'].map(tok);
+    const result = reorderTokens(bidi, mixed, 'rtl');
+    eq(result.order[0], 4, 'the last Arabic word is drawn leftmost');
+    eq(result.order[result.order.length - 1], 0, 'and the first Arabic word rightmost');
+    eq(result.order.indexOf(2), 2, 'the English word sits between them');
+  }
+
+  {
+    // Two English words inside Arabic must not themselves be reversed.
+    const phrase = ['بالعالم', ' ', 'Nikhil', ' ', 'Khilwani', ' ', 'مرحبا'].map(tok);
+    const result = reorderTokens(bidi, phrase, 'rtl');
+    const nikhil = result.order.indexOf(2);
+    const khilwani = result.order.indexOf(4);
+    ok(nikhil < khilwani, `the embedded English reads left to right (${nikhil} < ${khilwani})`);
+  }
+
+  eq(reorderTokens(bidi, [], 'auto').order.length, 0, 'no tokens is not an error');
+  deep(reorderTokens(bidi, [tok('one')], 'auto').order, [0], 'a single token needs no reordering');
+}
+
+{
+  // End to end through wrapRuns: without a bidi instance nothing is reordered,
+  // which is exactly the behaviour that shipped before.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const runs = [{ text: 'مرحبا بالعالم' }];
+
+  const logical = wrapRuns(runs, 11, 400, measure);
+  const visual = wrapRuns(runs, 11, 400, measure, [], { bidi: bidiFactory(), rtl: true });
+
+  const textsOf = (lines) => lines[0].pieces.map((p) => p.text);
+  deep(textsOf(logical), ['مرحبا', ' ', 'بالعالم'], 'no bidi instance leaves logical order');
+  deep(textsOf(visual), ['بالعالم', ' ', 'مرحبا'], 'with one, the words are reversed for display');
+
+  // x must be recomputed, or the reordered pieces would overlap.
+  const xs = visual[0].pieces.map((p) => p.x);
+  ok(xs.every((x, i) => i === 0 || x > xs[i - 1]), 'x positions increase across the visual order');
+  eq(xs[0], 0, 'and start at the line origin');
+}
+
+
+/* ------------------------------------- table cells: alignment and spacing */
+
+{
+  // Cell text was always drawn flush left, whatever the document said.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const cellWith = (extra) => ({
+    kind: 'table',
+    rows: [[{ runs: [{ text: 'hi' }], span: 1, ...extra }]],
+  });
+
+  // alignLine shifts piece.x, not the line item's x, so the drawn position is
+  // the sum of the two.
+  const xOf = (block) => {
+    const pages = layout([block], { geometry: A4, scale: DEFAULT_SCALE, measure });
+    const item = pages[0].items.find((i) => i.kind === 'line');
+    return item.x + item.line.pieces[0].x;
+  };
+
+  const left = xOf(cellWith({}));
+  const centre = xOf(cellWith({ align: 'center' }));
+  const right = xOf(cellWith({ align: 'right' }));
+  ok(centre > left + 20, `a centred cell is indented (${centre.toFixed(0)} vs ${left.toFixed(0)})`);
+  ok(right > centre + 20, `and a right-aligned one further still (${right.toFixed(0)})`);
+  eq(xOf(cellWith({ align: 'left' })), left, 'an explicit left is the same as the default');
+
+  const boxOf = (block) => {
+    const pages = layout([block], { geometry: A4, scale: DEFAULT_SCALE, measure });
+    return pages[0].items.find((i) => i.kind === 'cellBox');
+  };
+  const plain = boxOf(cellWith({}));
+  const spaced = boxOf(cellWith({ spaceBefore: 20, spaceAfter: 10 }));
+  ok(
+    spaced.height > plain.height + 25,
+    `cell spacing grows the row (${spaced.height.toFixed(1)} vs ${plain.height.toFixed(1)})`,
+  );
+
+  // The text must stay inside the row it grew.
+  const pages = layout([cellWith({ spaceBefore: 20, spaceAfter: 10 })], {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+  });
+  const box = pages[0].items.find((i) => i.kind === 'cellBox');
+  const line = pages[0].items.find((i) => i.kind === 'line');
+  ok(line.y >= box.y && line.y <= box.y + box.height, 'and the baseline stays inside the box');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

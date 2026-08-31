@@ -25,9 +25,14 @@ import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
 import { loadFonts, browserFontSource, needsFromFlags, type FontSource, type StyleKey } from './fonts.ts';
 import { LATIN, RTL_SCRIPTS, scriptFont, scriptsIn } from './scripts.ts';
 import { applyRunSpans, hexToUnitRgb, readTableCellRuns } from './runs.ts';
-import { readFurnitureRefs, parseFurniture, type FurnitureRefs } from './furniture.ts';
+import { loadBidi } from './bidi.ts';
+import {
+  readFurnitureRefs, parseFurniture, readTextBoxes,
+  type FurnitureRefs, type FurnitureBlock,
+} from './furniture.ts';
 import {
   readParagraphProps, readPageSetup, correlate, readImageExtents, intrinsicSize, readStyles,
+  readSpacingLike, normalizeText,
   type PageSetup,
 } from './wordxml.ts';
 import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type Drawn, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
@@ -77,6 +82,8 @@ export interface ConvertResult {
   header: boolean;
   /** True when a footer was found and drawn on every page. */
   footer: boolean;
+  /** Text boxes whose content was lifted into the flow. */
+  textBoxes: number;
   /** Paragraphs where the text did not line up, so defaults were kept. */
   unstyled: number;
   /** Page setup taken from the document, when it had any. */
@@ -179,6 +186,9 @@ export async function docxToPdf(
   let unstyled = 0;
   let runsStyled = 0;
   let cellsStyled = 0;
+  let textBoxes = 0;
+  /** Look for blocks lifted out of a text box, which have no XML paragraph. */
+  const boxLooks = new Map<Block, FurnitureBlock>();
   let pageSetup: PageSetup | null = null;
   let furniture: {
     refs: FurnitureRefs;
@@ -186,6 +196,8 @@ export async function docxToPdf(
     footerXml?: string;
     headerFirstXml?: string;
     footerFirstXml?: string;
+    headerEvenXml?: string;
+    footerEvenXml?: string;
   } | null = null;
 
   try {
@@ -197,6 +209,7 @@ export async function docxToPdf(
         f.name === 'word/document.xml' ||
         f.name === 'word/styles.xml' ||
         f.name === 'word/_rels/document.xml.rels' ||
+        f.name === 'word/settings.xml' ||
         /^word\/(?:header|footer)\d*\.xml$/.test(f.name),
     });
     const documentXml = entries['word/document.xml'] ? strFromU8(entries['word/document.xml']) : '';
@@ -224,7 +237,12 @@ export async function docxToPdf(
 
       const relsPart = entries['word/_rels/document.xml.rels'];
       if (relsPart) {
-        const refs = readFurnitureRefs(documentXml, strFromU8(relsPart));
+        const settingsPart = entries['word/settings.xml'];
+        const refs = readFurnitureRefs(
+          documentXml,
+          strFromU8(relsPart),
+          settingsPart ? strFromU8(settingsPart) : undefined,
+        );
         const partText = (name: string | undefined) =>
           name && entries[name] ? strFromU8(entries[name]) : undefined;
         furniture = {
@@ -233,6 +251,8 @@ export async function docxToPdf(
           footerXml: partText(refs.footer),
           headerFirstXml: partText(refs.headerFirst),
           footerFirstXml: partText(refs.footerFirst),
+          headerEvenXml: partText(refs.headerEven),
+          footerEvenXml: partText(refs.footerEven),
         };
       }
       const props = readParagraphProps(documentXml, styles);
@@ -270,6 +290,14 @@ export async function docxToPdf(
           if (xmlRows[r].length !== block.rows[r].length) continue;
           for (let c = 0; c < block.rows[r].length; c++) {
             const from = xmlRows[r][c];
+
+            // Paragraph properties for the cell. Applied whether or not the
+            // cell has run formatting, which is why it sits above the guard.
+            const cellLook = readSpacingLike(from.pPr);
+            if (cellLook.align) block.rows[r][c].align = cellLook.align;
+            if (cellLook.spaceBefore !== undefined) block.rows[r][c].spaceBefore = cellLook.spaceBefore;
+            if (cellLook.spaceAfter !== undefined) block.rows[r][c].spaceAfter = cellLook.spaceAfter;
+
             if (!from.spans.length) continue;
             const split = applyRunSpans(block.rows[r][c].runs, from.text, from.spans);
             if (split) {
@@ -281,6 +309,8 @@ export async function docxToPdf(
       }
 
       appearanceFor = (block) => {
+        const boxed = boxLooks.get(block);
+        if (boxed) return { align: boxed.align, tabs: boxed.tabs };
         const p = matched.attach(block);
         if (!p) return undefined;
         return {
@@ -296,8 +326,37 @@ export async function docxToPdf(
           lineAtLeast: p.lineAtLeast,
           contextualSpacing: p.contextualSpacing,
           pageBreakBefore: p.pageBreakBefore,
+          rtl: p.rtl,
         };
       };
+
+      /* ---- text boxes ---- */
+
+      // Their absolute position cannot be reproduced without a floating-layout
+      // concept, so the content goes into the flow near where it came from.
+      // Wrong position, but present: a template built out of text boxes used to
+      // convert to a nearly empty PDF.
+      for (const box of readTextBoxes(documentXml)) {
+        const lifted = box.blocks.map((part) => {
+          boxLooks.set(part.block, part);
+          return part.block;
+        });
+
+        let at = blocks.length;
+        if (box.afterText) {
+          const wanted = normalizeText(box.afterText);
+          for (let i = blocks.length - 1; i >= 0; i--) {
+            const candidate = blocks[i];
+            if (!('runs' in candidate) || !candidate.runs) continue;
+            if (normalizeText(candidate.runs.map((r) => r.text).join('')) === wanted) {
+              at = i + 1;
+              break;
+            }
+          }
+        }
+        blocks.splice(at, 0, ...lifted);
+        textBoxes++;
+      }
     }
   } catch {
     // Deliberately silent: this is an enhancement, not a requirement.
@@ -345,6 +404,13 @@ export async function docxToPdf(
       for (const run of block.runs) for (const k of scriptsIn(run.text)) scripts.add(k);
     }
   }
+
+  // Loaded here, before bandItems() closes over it: declaring it later put the
+  // constant in its temporal dead zone and every furnished document threw.
+  // Only fetched when a right-to-left script is actually present.
+  const bidi = [...scripts].some((key) => RTL_SCRIPTS.has(key))
+    ? await loadBidi().catch(() => undefined)
+    : undefined;
 
   const loaded = await loadFonts(pdf, needsFromFlags(runFlags), scripts, fontSource);
 
@@ -428,6 +494,7 @@ export async function docxToPdf(
         geometry: { width: pageBox.width, height: 10_000, margin: pageBox.margin },
         scale: { ...scale, singleLine },
         measure,
+        bidi,
         appearance: (block) => {
           const part = look.get(block);
           if (!part) return undefined;
@@ -450,13 +517,22 @@ export async function docxToPdf(
     return items.map((item) => ({ ...item, y: item.y + delta }));
   };
 
-  /** Which part applies to a page, honouring "different first page". */
+  /**
+   * Which part applies to a page: a different first page wins over the even/odd
+   * pair, which is the precedence Word uses.
+   */
   const partsFor = (index: number) => {
     if (!furniture) return { header: undefined, footer: undefined };
-    const first = index === 0 && furniture.refs.titlePg;
+    if (index === 0 && furniture.refs.titlePg) {
+      return {
+        header: furniture.headerFirstXml ?? furniture.headerXml,
+        footer: furniture.footerFirstXml ?? furniture.footerXml,
+      };
+    }
+    const even = furniture.refs.evenAndOdd && (index + 1) % 2 === 0;
     return {
-      header: first ? (furniture.headerFirstXml ?? furniture.headerXml) : furniture.headerXml,
-      footer: first ? (furniture.footerFirstXml ?? furniture.footerXml) : furniture.footerXml,
+      header: even ? (furniture.headerEvenXml ?? furniture.headerXml) : furniture.headerXml,
+      footer: even ? (furniture.footerEvenXml ?? furniture.footerXml) : furniture.footerXml,
     };
   };
 
@@ -465,14 +541,14 @@ export async function docxToPdf(
   let insetTop = 0;
   let insetBottom = 0;
   if (furniture) {
-    for (const xml of [furniture.headerXml, furniture.headerFirstXml]) {
+    for (const xml of [furniture.headerXml, furniture.headerFirstXml, furniture.headerEvenXml]) {
       if (!xml) continue;
       const band = bandItems(xml, 'header', 1, 1);
       if (!band.length) continue;
       const lowest = Math.min(...band.map((item) => item.y));
       insetTop = Math.max(insetTop, (pageBox.height - pageBox.margin) - (lowest - 6));
     }
-    for (const xml of [furniture.footerXml, furniture.footerFirstXml]) {
+    for (const xml of [furniture.footerXml, furniture.footerFirstXml, furniture.footerEvenXml]) {
       if (!xml) continue;
       const band = bandItems(xml, 'footer', 1, 1);
       if (!band.length) continue;
@@ -485,6 +561,7 @@ export async function docxToPdf(
 
   const laid: LaidOutPage[] = layout(blocks, {
     geometry: pageBox,
+    bidi,
     insetTop,
     insetBottom,
     scale: { ...scale, singleLine },
@@ -660,6 +737,7 @@ export async function docxToPdf(
     cellsStyled,
     header: drewHeader,
     footer: drewFooter,
+    textBoxes,
     pageSetup,
     metricFonts: loaded !== null,
     scripts: [...scripts].filter((k) => !(loaded?.missing ?? []).includes(k)),
@@ -693,9 +771,7 @@ export function describeConversion(result: ConvertResult): string {
     parts.push(`${names.join(', ')} rendered with an embedded font for that script.`);
   }
   if (result.rtl) {
-    parts.push(
-      'Right-to-left text is shaped correctly, but a line mixing it with left-to-right text is placed in logical order.',
-    );
+    parts.push('Right-to-left text is shaped and reordered for display.');
   }
   if (result.scriptsMissing.length) {
     const names = result.scriptsMissing.map((k) => scriptFont(k)?.label ?? k);
@@ -735,13 +811,12 @@ export function describeConversion(result: ConvertResult): string {
 }
 
 export const LAYOUT_CAVEATS = [
-  'Table cells take their run colours, highlighting and sizes, but not paragraph alignment, indents or spacing; a nested table gets neither',
-  'Footnotes and endnotes are not carried over',
-  'Headers and footers carry text, page numbers and a different first page, but not images, tables or even/odd variants',
+  'Table cells do not take paragraph indents or tab stops, and a nested table gets no cell formatting at all',
+  'Footnotes are collected as a numbered list at the end of the document rather than at the foot of each page',
+  'Headers and footers carry text, page numbers, a different first page and even/odd variants, but not images or tables',
   'A page break in the middle of a paragraph is not reproduced; one before a paragraph, or on its own, is',
-  'Text boxes and shapes are not reproduced',
+  'A text box keeps its content but is placed in the reading flow, not at its position on the page; shapes are not reproduced',
   'Columns are equal width and are not balanced on the last page; a document that changes column count part-way uses its first section throughout',
-  'A line mixing Arabic or Hebrew with left-to-right text is laid out in logical order, not visual order',
   'Indic, Arabic, Hebrew and Thai text is drawn at a single weight — bold and italic are not synthesised for those scripts',
 ] as const;
 
