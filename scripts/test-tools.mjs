@@ -32,6 +32,9 @@ import {
   alignLine, lineWidth,
 } from '../src/lib/docx/layout.ts';
 import {
+  scriptKeyFor, scriptsIn, segmentByScript, scriptFont, SCRIPT_FONTS, RTL_SCRIPTS, LATIN,
+} from '../src/lib/docx/scripts.ts';
+import {
   twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables,
 } from '../src/lib/docx/wordxml.ts';
 
@@ -1062,6 +1065,112 @@ eq(readPageSetup(wp('<w:sectPr><w:pgSz w:w="10" w:h="10"/></w:sectPr>')), null, 
 }
 
 /* -------------------------------------------------------------------- end */
+
+
+/* ---------------------------------------------- script detection and splitting */
+
+eq(scriptKeyFor(0x41), LATIN, 'A is Latin');
+eq(scriptKeyFor(0x0416), LATIN, 'Cyrillic Zh is served by Carlito, so it counts as Latin');
+eq(scriptKeyFor(0x03b1), LATIN, 'Greek alpha is served by Carlito');
+eq(scriptKeyFor(0x0928), 'devanagari', 'na is Devanagari');
+eq(scriptKeyFor(0x0964), 'devanagari', 'the danda is Devanagari');
+eq(scriptKeyFor(0x09aa), 'bengali', 'Bengali pa');
+eq(scriptKeyFor(0x0ba4), 'tamil', 'Tamil ta');
+eq(scriptKeyFor(0x0627), 'arabic', 'Arabic alef');
+eq(scriptKeyFor(0xfe8d), 'arabic', 'an Arabic presentation form still resolves to Arabic');
+eq(scriptKeyFor(0x05d0), 'hebrew', 'Hebrew alef');
+eq(scriptKeyFor(0x0e01), 'thai', 'Thai ko kai');
+eq(scriptKeyFor(0x4e2d), LATIN, 'CJK has no font here, so it falls through to Latin and gets reported');
+
+// Every declared script must have a file, a label and at least one range, or a
+// document using it would load nothing and silently render "?".
+for (const font of SCRIPT_FONTS) {
+  ok(font.file.endsWith('.ttf'), `${font.key}: names a .ttf`);
+  ok(font.label.length > 0, `${font.key}: has a human-readable label`);
+  ok(font.ranges.length > 0, `${font.key}: declares at least one range`);
+  eq(scriptFont(font.key), font, `${font.key}: is findable by key`);
+  // Its own first codepoint must resolve back to it — catches a range typo.
+  eq(scriptKeyFor(font.ranges[0][0]), font.key, `${font.key}: its first codepoint maps back`);
+}
+ok(RTL_SCRIPTS.has('arabic') && RTL_SCRIPTS.has('hebrew'), 'Arabic and Hebrew are marked right-to-left');
+ok(!RTL_SCRIPTS.has('devanagari'), 'Devanagari is not right-to-left');
+
+deep([...scriptsIn('plain english')], [], 'a Latin string reports no extra scripts');
+deep([...scriptsIn('hello नमस्ते')], ['devanagari'], 'a mixed string reports the script it needs');
+eq(scriptsIn('नमस्ते مرحبا').size, 2, 'two scripts are both reported');
+
+/* --- segmentByScript: the cut points that shaping depends on --- */
+
+deep(segmentByScript(''), [], 'an empty string yields no segments');
+eq(segmentByScript('Hello world').length, 1, 'pure Latin is a single segment');
+
+{
+  const segs = segmentByScript('Hindi: नमस्ते');
+  eq(segs.length, 2, 'Latin then Devanagari is two segments');
+  eq(segs[0]?.script, LATIN, 'the first segment is Latin');
+  eq(segs[1]?.script, 'devanagari', 'the second is Devanagari');
+  eq(segs.map((x) => x.text).join(''), 'Hindi: नमस्ते', 'segmentation loses no characters');
+}
+
+// The rule that matters most: a cluster must never be cut, or the matra
+// detaches and the conjunct falls apart when it is drawn.
+eq(segmentByScript('नि').length, 1, 'a consonant plus its matra stays one segment');
+eq(segmentByScript('क्ष').length, 1, 'a conjunct stays one segment');
+eq(segmentByScript('न‍म').length, 1, 'a zero-width joiner does not split a Devanagari cluster');
+eq(segmentByScript('न‌म').length, 1, 'a zero-width non-joiner does not split one either');
+
+{
+  // A space between two Hindi words must not force a font switch.
+  const segs = segmentByScript('नमस्ते दुनिया');
+  eq(segs.length, 1, 'a space inside Hindi keeps it one segment');
+  eq(segs[0]?.script, 'devanagari', 'and that segment is Devanagari');
+}
+
+{
+  // A leading space belongs to what follows it, not to a stray Latin segment.
+  const segs = segmentByScript(' नमस्ते');
+  eq(segs.length, 1, 'a leading space joins the script that follows');
+  eq(segs[0]?.script, 'devanagari', 'so the whole thing is Devanagari');
+}
+
+eq(segmentByScript('  ').length, 1, 'only-neutral text still yields one segment');
+eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
+
+{
+  const segs = segmentByScript('a नमस्ते b مرحبا');
+  eq(segs.length, 4, 'three scripts across four alternating segments');
+  deep(segs.map((x) => x.script), [LATIN, 'devanagari', LATIN, 'arabic'], 'in document order');
+}
+
+/* --- wrapRuns tags every piece with the font that must draw it --- */
+
+{
+  const measure = (text, style) => text.length * style.size * (style.font === LATIN ? 0.5 : 0.6);
+  const lines = wrapRuns([{ text: 'Hindi: नमस्ते' }], 11, 400, measure);
+  const pieces = lines.flatMap((l) => l.pieces);
+  ok(pieces.length >= 2, `the mixed run produced ${pieces.length} pieces`);
+  ok(pieces.every((piece) => typeof piece.font === 'string' && piece.font.length > 0), 'every piece names a font');
+  ok(pieces.some((piece) => piece.font === LATIN), 'at least one piece is Latin');
+  ok(pieces.some((piece) => piece.font === 'devanagari'), 'at least one piece is Devanagari');
+  // No piece may mix scripts, because one piece is one drawText call.
+  for (const piece of pieces) {
+    const scripts = new Set(segmentByScript(piece.text).map((x) => x.script));
+    ok(scripts.size <= 1, `piece ${JSON.stringify(piece.text)} is single-script`);
+  }
+}
+
+{
+  // List markers are Latin whatever the item's language is.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const pages = layout(
+    [{ kind: 'listItem', level: 1, marker: '•', ordered: false, runs: [{ text: 'नमस्ते' }] }],
+    { geometry: A4, scale: DEFAULT_SCALE, measure },
+  );
+  const pieces = pages[0].items.filter((i) => i.kind === 'line').flatMap((i) => i.line.pieces);
+  const marker = pieces.find((piece) => piece.text === '•');
+  ok(marker !== undefined, 'the bullet marker was drawn');
+  eq(marker?.font, LATIN, 'the bullet is drawn with the Latin face, not the Devanagari one');
+}
 
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);

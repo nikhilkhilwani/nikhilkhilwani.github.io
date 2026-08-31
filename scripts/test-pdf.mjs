@@ -41,6 +41,17 @@ const nodeFontSource = async (file) =>
   new Uint8Array(await readFileFs(joinPath(process.cwd(), 'public', 'fonts', file)));
 
 const docxToPdf = (input, opts = {}) => docxToPdfRaw(input, { fontSource: nodeFontSource, ...opts });
+
+/** Same reader, but records every file requested. */
+function trackingFontSource() {
+  const asked = [];
+  const source = async (file) => {
+    asked.push(file);
+    return nodeFontSource(file);
+  };
+  source.asked = asked;
+  return source;
+}
 import { OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
 
 let fail = 0;
@@ -589,12 +600,15 @@ const plain = await makePlain();
 
   /* --- unsupported characters are reported, not dropped silently --- */
 
-  const hindi = await docxToPdf(build(p('Hello and नमस्ते together')));
-  ok(hindi.unsupported.length > 0, `word: Devanagari is reported (${hindi.unsupported.length} chars)`);
-  ok(describeConversion(hindi).includes('could not be drawn'), 'word: the summary says so plainly');
-  const hindiPdf = await pdfjs.getDocument({ data: new Uint8Array(hindi.bytes), isEvalSupported: false }).promise;
-  const hindiText = (await (await hindiPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join(' ');
-  ok(hindiText.includes('Hello and'), 'word: the Latin part still renders alongside it');
+  // Devanagari used to be the example here. It renders properly now, so the
+  // "reported honestly" path needs a script that genuinely has no font bundled:
+  // CJK is not in SCRIPT_FONTS, so it still falls through to "?".
+  const cjk = await docxToPdf(build(p('Hello and 中文日本語 together')));
+  ok(cjk.unsupported.length > 0, `word: CJK is reported as undrawable (${cjk.unsupported.length} chars)`);
+  ok(describeConversion(cjk).includes('could not be drawn'), 'word: the summary says so plainly');
+  const cjkPdf = await pdfjs.getDocument({ data: new Uint8Array(cjk.bytes), isEvalSupported: false }).promise;
+  const cjkText = (await (await cjkPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join(' ');
+  ok(cjkText.includes('Hello and'), 'word: the Latin part still renders alongside it');
 
   /* --- the metric-compatible fonts: prove the path is live, not falling back --- */
 
@@ -660,6 +674,80 @@ const plain = await makePlain();
   const offPdf = await pdfjs.getDocument({ data: new Uint8Array(offline.bytes), isEvalSupported: false }).promise;
   const offText = (await (await offPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join('');
   ok(offText.includes('Fallback path'), 'word: the fallback output is still real text');
+
+  /* --- complex scripts: Devanagari, and the fonts fetched to draw it --- */
+
+  const HINDI = 'नमस्ते दुनिया। हिन्दी में लिखा गया वाक्य।';
+  const trackHindi = trackingFontSource();
+  const hi = await docxToPdf(build(p(`English then Hindi: ${HINDI}`)), { fontSource: trackHindi });
+
+  eq(hi.unsupported.length, 0, 'word: Devanagari is fully drawable now, nothing became "?"');
+  eq(hi.scripts.join(","), ['devanagari'].join(","), 'word: the result names Devanagari as rendered');
+  eq(hi.scriptsMissing.join(","), "", 'word: no script font failed to load');
+  eq(hi.rtl, false, 'word: Devanagari is not flagged right-to-left');
+
+  // Lazy loading, per script: an English+Hindi document must not drag in Tamil.
+  ok(
+    trackHindi.asked.includes('NotoSansDevanagari.ttf'),
+    `word: the Devanagari font was fetched (${trackHindi.asked.join(', ')})`,
+  );
+  ok(trackHindi.asked.includes('Carlito-Regular.ttf'), 'word: Carlito was fetched for the English part');
+  ok(
+    !trackHindi.asked.some((f) => /Tamil|Bengali|Arabic|Hebrew|Thai|Telugu|Kannada|Malayalam|Gujarati|Gurmukhi|Oriya/.test(f)),
+    'word: no font for a script the document does not contain was fetched',
+  );
+
+  const hiPdf = await pdfjs.getDocument({ data: new Uint8Array(hi.bytes), isEvalSupported: false }).promise;
+  const hiText = (await (await hiPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join('');
+  ok(hiText.includes('English then Hindi'), 'word: the English half is real text');
+  // Devanagari extraction reflects VISUAL glyph order, because a reordered
+  // matra is a different glyph — so assert on characters present rather than
+  // on the original string.
+  for (const ch of ['न', 'म', 'स', 'द', 'ह', '।']) {
+    ok(hiText.includes(ch), `word: Devanagari "${ch}" survives into the PDF text layer`);
+  }
+  const rawHi = Buffer.from(hi.bytes).toString('latin1');
+  ok(rawHi.includes('NotoSansDevanagari'), 'word: the Devanagari font program is embedded');
+  ok(rawHi.includes('Carlito'), 'word: Carlito is embedded alongside it');
+  ok(
+    hi.bytes.length < 250_000,
+    `word: two subsetted fonts stay small (${(hi.bytes.length / 1024).toFixed(0)}KB)`,
+  );
+
+  /* --- several scripts at once --- */
+
+  const multi = await docxToPdf(
+    build(
+      p('Hindi: नमस्ते') + p('Bengali: আমি') + p('Tamil: நான்') + p('Arabic: مرحبا'),
+    ),
+  );
+  eq(multi.unsupported.length, 0, 'word: four scripts, nothing undrawable');
+  eq(multi.scripts.length, 4, `word: all four scripts reported (${multi.scripts.join(', ')})`);
+  eq(multi.rtl, true, 'word: the Arabic makes the result flag right-to-left');
+  ok(
+    describeConversion(multi).includes('logical order'),
+    'word: the summary admits there is no bidi rather than implying correct RTL layout',
+  );
+
+  /* --- a script font that cannot be loaded is reported, not silently wrong --- */
+
+  const noDev = await docxToPdf(build(p(`Hindi ${HINDI}`)), {
+    fontSource: async (file) => {
+      if (file.includes('Devanagari')) throw new Error('unavailable');
+      return nodeFontSource(file);
+    },
+  });
+  eq(noDev.metricFonts, true, 'word: losing one script font does not lose Carlito');
+  eq(noDev.scriptsMissing.join(","), ['devanagari'].join(","), 'word: the missing script is named');
+  eq(noDev.scripts.join(","), "", 'word: and is not claimed as rendered');
+  ok(noDev.unsupported.length > 0, 'word: its characters are reported as undrawable');
+  ok(
+    describeConversion(noDev).includes('Could not load a font'),
+    'word: the summary says the font could not be loaded',
+  );
+  const ndPdf = await pdfjs.getDocument({ data: new Uint8Array(noDev.bytes), isEvalSupported: false }).promise;
+  const ndText = (await (await ndPdf.getPage(1)).getTextContent()).items.map((i) => i.str).join('');
+  ok(ndText.includes('Hindi'), 'word: the Latin part still converts when a script font is missing');
 }
 
 

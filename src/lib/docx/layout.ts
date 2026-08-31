@@ -11,9 +11,13 @@
 
 import type { Block, Cell, Run } from './blocks.ts';
 import type { Align, TabStop } from './wordxml.ts';
+import { LATIN, segmentByScript } from './scripts.ts';
 
 /** Width of `text` at `size` in the given style. Supplied by the renderer. */
-export type Measure = (text: string, style: { bold: boolean; italic: boolean; size: number }) => number;
+export type Measure = (
+  text: string,
+  style: { bold: boolean; italic: boolean; size: number; font: string },
+) => number;
 
 export interface PageGeometry {
   width: number;
@@ -54,6 +58,11 @@ export const SCRIPT_SCALE = 0.72;
 /** A run positioned on a line. */
 export interface Piece {
   text: string;
+  /**
+   * Script key from scripts.ts naming the font this piece must be drawn with.
+   * A piece never spans two scripts, because one piece is one drawText call.
+   */
+  font: string;
   bold: boolean;
   italic: boolean;
   underline: boolean;
@@ -165,14 +174,31 @@ export function wrapRuns(
   };
 
   // Flatten to tokens first, so a right-aligned tab can measure what follows it.
-  const tokens: { text: string; w: number; run: Run; style: { bold: boolean; italic: boolean; size: number }; rise: number }[] = [];
+  const tokens: {
+    text: string;
+    w: number;
+    run: Run;
+    style: { bold: boolean; italic: boolean; size: number; font: string };
+    rise: number;
+  }[] = [];
   for (const run of runs) {
     const scripted = run.script ? size * SCRIPT_SCALE : size;
-    const style = { bold: !!run.bold, italic: !!run.italic, size: scripted };
     const rise = run.script === 'super' ? size * 0.33 : run.script === 'sub' ? -size * 0.16 : 0;
-    for (const text of run.text.split(/(\t|\n|[^\S\t\n]+)/).filter((t) => t.length)) {
-      const w = text === '\t' || text === '\n' ? 0 : measure(text, style);
-      tokens.push({ text, w, run, style, rise });
+    // Cut at script boundaries BEFORE tokenising. One piece becomes one
+    // drawText call with one font, so no piece may straddle two scripts.
+    // segmentByScript keeps clusters intact, so this never splits a
+    // Devanagari conjunct or breaks Arabic joining.
+    for (const segment of segmentByScript(run.text)) {
+      const style = {
+        bold: !!run.bold,
+        italic: !!run.italic,
+        size: scripted,
+        font: segment.script,
+      };
+      for (const text of segment.text.split(/(\t|\n|[^\S\t\n]+)/).filter((t) => t.length)) {
+        const w = text === '\t' || text === '\n' ? 0 : measure(text, style);
+        tokens.push({ text, w, run, style, rise });
+      }
     }
   }
 
@@ -481,13 +507,16 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
             pieces: [
               {
                 text: block.marker,
+                // Markers are bullets and Latin digits, so they are drawn with
+                // the Latin face whatever script the item's text turns out to be.
+                font: LATIN,
                 bold: false,
                 italic: false,
                 underline: false,
                 strike: false,
                 size,
                 x: 0,
-                width: measure(block.marker, { bold: false, italic: false, size }),
+                width: measure(block.marker, { bold: false, italic: false, size, font: LATIN }),
                 rise: 0,
               },
             ],

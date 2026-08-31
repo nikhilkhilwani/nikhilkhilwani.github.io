@@ -60,7 +60,7 @@ export const tools: ToolMeta[] = [
     slug: 'word-to-pdf',
     title: 'Word to PDF',
     description:
-      'Turn a .docx into a PDF with selectable text, headings, lists and tables — without uploading it.',
+      'Turn a .docx into a PDF with selectable text, headings, lists and tables — including Hindi and other Indic scripts, without uploading it.',
     icon: 'file-text',
     status: 'available',
     category: 'pdf',

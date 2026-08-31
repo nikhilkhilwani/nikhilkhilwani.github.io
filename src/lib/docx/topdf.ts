@@ -9,14 +9,21 @@
  * with Carlito, whose advance widths are byte-identical to Calibri's. See
  * fonts.ts for why that font and why the full fontkit is required.
  *
+ * Complex scripts work too. fontkit does the shaping — Devanagari conjuncts and
+ * matra reordering, Arabic cursive joining — and pdf-lib passes those shaped
+ * glyph ids straight through, so Hindi and Arabic render correctly as long as
+ * the font is embedded as a subsetted .ttf. See fonts.ts for why that proviso
+ * is the whole ballgame.
+ *
  * What this is NOT: a reimplementation of Word's layout engine. Headers,
  * footers, explicit page breaks, columns and floating objects are still not
- * reproduced, and scripts needing complex shaping (Devanagari, Arabic, Thai)
- * cannot be drawn correctly at all — those are reported, not faked.
+ * reproduced, and there is no bidi algorithm, so a line mixing Arabic with
+ * English comes out in logical order.
  */
 
 import { parseBlocks, unsupportedCharacters, type Block } from './blocks.ts';
-import { loadMetricFonts, browserFontSource, needsFromFlags, type FontSource } from './fonts.ts';
+import { loadFonts, browserFontSource, needsFromFlags, type FontSource, type StyleKey } from './fonts.ts';
+import { LATIN, RTL_SCRIPTS, scriptFont, scriptsIn } from './scripts.ts';
 import { readParagraphProps, readPageSetup, correlate, type PageSetup } from './wordxml.ts';
 import { layout, DEFAULT_SCALE, A4, type BlockAppearance, type LaidOutPage, type Measure, type PageGeometry, type TypeScale } from './layout.ts';
 
@@ -66,6 +73,12 @@ export interface ConvertResult {
    * files could not be loaded and the WinAnsi built-ins were used instead.
    */
   metricFonts: boolean;
+  /** Non-Latin scripts drawn with a real font for that script. */
+  scripts: string[];
+  /** Non-Latin scripts present whose font could not be loaded. */
+  scriptsMissing: string[];
+  /** True when a right-to-left script is present, where mixed lines need bidi. */
+  rtl: boolean;
 }
 
 export interface ConvertOptions {
@@ -184,10 +197,23 @@ export async function docxToPdf(
     }
   }
 
-  const metric = await loadMetricFonts(pdf, needsFromFlags(runFlags), fontSource);
+  // Every non-Latin script in the document, so only the fonts actually needed
+  // are fetched. A pure-English document pulls nothing beyond Carlito.
+  const scripts = new Set<string>();
+  for (const block of blocks) {
+    if (block.kind === 'table') {
+      for (const row of block.rows) {
+        for (const cell of row) for (const run of cell.runs) for (const k of scriptsIn(run.text)) scripts.add(k);
+      }
+    } else if (block.kind === 'heading' || block.kind === 'paragraph' || block.kind === 'listItem') {
+      for (const run of block.runs) for (const k of scriptsIn(run.text)) scripts.add(k);
+    }
+  }
 
-  const fonts = metric
-    ? metric.faces
+  const loaded = await loadFonts(pdf, needsFromFlags(runFlags), scripts, fontSource);
+
+  const fallback = loaded
+    ? null
     : {
         // Fallback only. WinAnsi-encoded, and metrics unlike Word's — this is
         // what every conversion looked like before fonts.ts existed.
@@ -197,12 +223,24 @@ export async function docxToPdf(
         boldItalic: await pdf.embedFont(StandardFonts.TimesRomanBoldItalic),
       };
 
-  // Asked of the embedded font directly when there is one, so the warning
+  // Asked of the embedded fonts directly when there are any, so the warning
   // reflects what can really be drawn rather than assuming the WinAnsi set.
-  const unsupported = unsupportedCharacters(blocks, metric?.hasGlyph);
+  const unsupported = unsupportedCharacters(blocks, loaded?.hasGlyph);
 
-  const pick = (bold: boolean, italic: boolean) =>
-    bold && italic ? fonts.boldItalic : bold ? fonts.bold : italic ? fonts.italic : fonts.regular;
+  const styleKey = (bold: boolean, italic: boolean): StyleKey =>
+    bold && italic ? 'boldItalic' : bold ? 'bold' : italic ? 'italic' : 'regular';
+
+  /**
+   * The face for one piece. A piece carries the script key layout resolved for
+   * it; if that script's font failed to load, Latin draws it and the characters
+   * come out as "?" — which unsupportedCharacters has already reported.
+   */
+  const pick = (font: string, bold: boolean, italic: boolean) => {
+    if (fallback) return fallback[styleKey(bold, italic)];
+    const sets = loaded!.sets;
+    const set = sets.get(font) ?? sets.get(LATIN)!;
+    return set.faces[styleKey(bold, italic)];
+  };
 
   // Anything the fonts cannot encode is replaced before measuring, so the
   // widths used for layout match what actually gets drawn.
@@ -211,7 +249,7 @@ export async function docxToPdf(
 
   const measure: Measure = (text, style) => {
     try {
-      return pick(style.bold, style.italic).widthOfTextAtSize(safe(text), style.size);
+      return pick(style.font, style.bold, style.italic).widthOfTextAtSize(safe(text), style.size);
     } catch {
       // Never let a measurement failure abort the whole conversion.
       return text.length * style.size * 0.5;
@@ -245,7 +283,7 @@ export async function docxToPdf(
               x,
               y,
               size: piece.size,
-              font: pick(piece.bold, piece.italic),
+              font: pick(piece.font, piece.bold, piece.italic),
               color: piece.href ? linkInk : ink,
             });
           }
@@ -346,7 +384,10 @@ export async function docxToPdf(
     styled,
     unstyled,
     pageSetup,
-    metricFonts: metric !== null,
+    metricFonts: loaded !== null,
+    scripts: [...scripts].filter((k) => !(loaded?.missing ?? []).includes(k)),
+    scriptsMissing: loaded?.missing ?? [...scripts],
+    rtl: [...scripts].some((k) => RTL_SCRIPTS.has(k)),
   };
 }
 
@@ -367,12 +408,25 @@ export function describeConversion(result: ConvertResult): string {
   const parts = [`${result.pages} page${result.pages === 1 ? '' : 's'} from ${result.blocks} blocks.`];
   parts.push('Text is selectable and searchable.');
 
+  if (result.scripts.length) {
+    const names = result.scripts.map((k) => scriptFont(k)?.label ?? k);
+    parts.push(`${names.join(', ')} rendered with an embedded font for that script.`);
+  }
+  if (result.rtl) {
+    parts.push(
+      'Right-to-left text is shaped correctly, but a line mixing it with left-to-right text is placed in logical order.',
+    );
+  }
+  if (result.scriptsMissing.length) {
+    const names = result.scriptsMissing.map((k) => scriptFont(k)?.label ?? k);
+    parts.push(`Could not load a font for ${names.join(', ')}, so that text became "?".`);
+  }
   if (result.unsupported.length) {
     const shown = result.unsupported.slice(0, 6).join(' ');
     // The reason differs by path, and saying the wrong one sends people looking
     // for a fix that does not exist.
     const why = result.metricFonts
-      ? 'the embedded font covers Latin, Latin-extended, Cyrillic and Greek — other scripts need shaping this tool cannot do'
+      ? 'no embedded font covers them'
       : 'the font files could not be loaded, so the built-in fonts were used and those cover Latin only';
     parts.push(
       `${result.unsupported.length} character${result.unsupported.length === 1 ? '' : 's'} could not be drawn (${shown}) and became "?" — ${why}.`,
@@ -404,7 +458,8 @@ export const LAYOUT_CAVEATS = [
   'Font colours and highlighting are not carried over, and a paragraph mixing sizes takes its first size',
   'Headers, footers, page numbers, footnotes and explicit page breaks are not carried over',
   'Columns, text boxes, shapes and vertically merged cells are not reproduced',
-  'Hindi, Arabic, Thai and other scripts needing complex shaping cannot be drawn — they are reported, not silently mangled',
+  'A line mixing Arabic or Hebrew with left-to-right text is laid out in logical order, not visual order',
+  'Indic, Arabic, Hebrew and Thai text is drawn at a single weight — bold and italic are not synthesised for those scripts',
 ] as const;
 
 export type { Block };

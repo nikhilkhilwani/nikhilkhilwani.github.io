@@ -1,38 +1,49 @@
 /**
- * Metric-compatible font loading for the Word converter.
+ * Font loading for the Word converter.
  *
  * Why this exists: the built-in PDF fonts (standard 14) are WinAnsi-encoded, so
- * every character above U+00FF became "?" — Cyrillic, Greek, Vietnamese and all
- * the Latin-extended accents. Their metrics are also nothing like Word's, so
- * line breaks and page counts drifted from the source document.
+ * every character above U+00FF became "?" — Cyrillic, Greek, Vietnamese, all the
+ * Latin-extended accents, and every Indic script. Their metrics are also nothing
+ * like Word's, so line breaks and page counts drifted from the source document.
  *
- * Carlito fixes both. Its advance widths are byte-identical to Calibri's —
- * measured against the Calibri shipped with Windows, 0.0000% divergence across
- * sample strings — so wrapping now matches what Word did, and its coverage adds
- * Latin-extended, Cyrillic, Greek and Vietnamese. It is metric-compatible by
- * design and OFL licensed, which is why LibreOffice substitutes it for Calibri.
+ * Carlito fixes the Latin half of that. Its advance widths are byte-identical to
+ * Calibri's — measured against the Calibri shipped with Windows, 0.0000%
+ * divergence across sample strings — so wrapping now matches what Word did, and
+ * its coverage adds Latin-extended, Cyrillic, Greek and Vietnamese. It is
+ * metric-compatible by design and OFL licensed, which is why LibreOffice
+ * substitutes it for Calibri.
  *
- * Two things that are load-bearing and easy to break:
+ * Everything else comes from a per-script Noto font, loaded only if the document
+ * actually contains that script. See scripts.ts for the mapping.
+ *
+ * Three things that are load-bearing and easy to break:
  *
  *   1. The FULL `fontkit` is required, not `@pdf-lib/fontkit`. The stripped
  *      build throws "Cannot read properties of undefined (reading 'pos')" when
  *      pdf-lib subsets, which forces whole-font embedding: a 278KB PDF instead
  *      of 12KB, AND a broken ToUnicode table where "Latin" extracts as "Laࢢn"
- *      because the ti ligature reverse-maps to the wrong character. Subsetting
- *      with the real fontkit fixes the size and the extraction together.
+ *      because the ti ligature reverse-maps to the wrong character.
  *
- *   2. `subset: true` is therefore mandatory, not an optimisation.
+ *   2. `subset: true` is therefore mandatory, not an optimisation. It is also
+ *      what makes complex scripts work at all: embedding a whole variable font
+ *      produced a font program pdf.js rejected ("Required 'loca' table is not
+ *      found"), so viewers substituted a font and drew correct glyph IDs against
+ *      the wrong glyph set — which looks exactly like broken shaping.
  *
- * Loading is lazy per style — a document with no italics never fetches the
- * italic file — and failure is never fatal: the caller falls back to the
- * built-in fonts, which is exactly what shipped before this existed.
+ *   3. Only .ttf/.otf may be embedded. pdf-lib accepts WOFF without complaint
+ *      and writes the compressed bytes as a TrueType program, producing that
+ *      same silently-substituted garbage.
+ *
+ * Failure is never fatal: a script whose font will not load is reported as
+ * undrawable, and if Carlito itself fails the caller keeps the built-in fonts.
  */
 
 import type { PDFDocument, PDFFont } from '@cantoo/pdf-lib';
+import { LATIN, scriptFont, scriptKeyFor } from './scripts.ts';
 
 export type StyleKey = 'regular' | 'bold' | 'italic' | 'boldItalic';
 
-export const FONT_FILE: Record<StyleKey, string> = {
+export const LATIN_FONT_FILE: Record<StyleKey, string> = {
   regular: 'Carlito-Regular.ttf',
   bold: 'Carlito-Bold.ttf',
   italic: 'Carlito-Italic.ttf',
@@ -52,13 +63,22 @@ export interface StyleNeeds {
  */
 export type FontSource = (file: string) => Promise<Uint8Array>;
 
-export interface LoadedFonts {
+/** One script's faces. Script fonts ship a single weight, so all four match. */
+export interface FontSet {
   faces: Record<StyleKey, PDFFont>;
-  /** True when a glyph exists, so the caller knows what it can actually draw. */
   hasGlyph: (codePoint: number) => boolean;
 }
 
-/** Reads the committed TTFs from public/fonts at runtime. */
+export interface LoadedFonts {
+  /** Keyed by script key from scripts.ts; always contains LATIN. */
+  sets: Map<string, FontSet>;
+  /** Asks whichever set is responsible for that codepoint. */
+  hasGlyph: (codePoint: number) => boolean;
+  /** Scripts present in the document whose font could not be loaded. */
+  missing: string[];
+}
+
+/** Reads the committed fonts from public/fonts at runtime. */
 export function browserFontSource(base = '/'): FontSource {
   return async (file) => {
     const res = await fetch(`${base}fonts/${file}`);
@@ -67,89 +87,13 @@ export function browserFontSource(base = '/'): FontSource {
   };
 }
 
-/** The styles to fetch for a given set of needs, regular always included. */
+/** The Latin styles to fetch for a given set of needs, regular always included. */
 export function stylesFor(needs: StyleNeeds): StyleKey[] {
   const keys: StyleKey[] = ['regular'];
   if (needs.bold) keys.push('bold');
   if (needs.italic) keys.push('italic');
   if (needs.boldItalic) keys.push('boldItalic');
   return keys;
-}
-
-/**
- * Embeds the metric-compatible faces into `pdf`, or returns null if anything
- * goes wrong. All-or-nothing on purpose: mixing Carlito with a standard-14
- * fallback inside one document would give it two different sets of metrics and
- * inconsistent line breaks, which is worse than consistently using the old
- * fonts.
- */
-export async function loadMetricFonts(
-  pdf: PDFDocument,
-  needs: StyleNeeds,
-  source: FontSource,
-): Promise<LoadedFonts | null> {
-  try {
-    // Dynamic so a conversion that never needs it does not pay for it, and so
-    // a broken font bundle cannot take down module load.
-    const fontkit = await import('fontkit');
-    pdf.registerFontkit(fontkit as Parameters<PDFDocument['registerFontkit']>[0]);
-
-    const wanted = stylesFor(needs);
-    const bytes = new Map<StyleKey, Uint8Array>();
-    await Promise.all(
-      wanted.map(async (key) => {
-        bytes.set(key, await source(FONT_FILE[key]));
-      }),
-    );
-
-    const embedded = new Map<StyleKey, PDFFont>();
-    for (const key of wanted) {
-      // subset:true is required — see the note at the top of this file.
-      embedded.set(key, await pdf.embedFont(bytes.get(key)!, { subset: true }));
-    }
-
-    const regular = embedded.get('regular');
-    if (!regular) return null;
-
-    // Unused styles reuse regular so `faces` is always complete. They are never
-    // drawn with, because the document contained no runs in that style.
-    const faces: Record<StyleKey, PDFFont> = {
-      regular,
-      bold: embedded.get('bold') ?? regular,
-      italic: embedded.get('italic') ?? regular,
-      boldItalic: embedded.get('boldItalic') ?? regular,
-    };
-
-    // Coverage is read from the regular face. Every Carlito style carries the
-    // same character set, so asking one is equivalent to asking all four.
-    const probe = fontkit.create(bytes.get('regular')! as Uint8Array & Buffer);
-    // fontkit.create() can also return a FontCollection (a .ttc holding several
-    // faces). These are single-face .ttf files, but the union has to be narrowed
-    // rather than asserted away.
-    const probeGlyph =
-      'hasGlyphForCodePoint' in probe
-        ? (codePoint: number) => probe.hasGlyphForCodePoint(codePoint) === true
-        : () => false;
-
-    const cache = new Map<number, boolean>();
-    const hasGlyph = (codePoint: number): boolean => {
-      const known = cache.get(codePoint);
-      if (known !== undefined) return known;
-      let answer = false;
-      try {
-        answer = probeGlyph(codePoint);
-      } catch {
-        answer = false;
-      }
-      cache.set(codePoint, answer);
-      return answer;
-    };
-
-    return { faces, hasGlyph };
-  } catch {
-    // Never fatal: the caller keeps the built-in fonts.
-    return null;
-  }
 }
 
 /** Which faces the parsed runs actually call for. */
@@ -163,4 +107,123 @@ export function needsFromFlags(
     else if (f.italic) needs.italic = true;
   }
   return needs;
+}
+
+/** Coverage probe over the raw bytes, cached because layout asks repeatedly. */
+function glyphProbe(fontkit: typeof import('fontkit'), bytes: Uint8Array) {
+  // fontkit.create() can also return a FontCollection (a .ttc holding several
+  // faces). These are single-face files, but the union has to be narrowed
+  // rather than asserted away.
+  const font = fontkit.create(bytes as Uint8Array & Buffer);
+  const ask =
+    'hasGlyphForCodePoint' in font
+      ? (cp: number) => font.hasGlyphForCodePoint(cp) === true
+      : () => false;
+
+  const cache = new Map<number, boolean>();
+  return (codePoint: number): boolean => {
+    const known = cache.get(codePoint);
+    if (known !== undefined) return known;
+    let answer = false;
+    try {
+      answer = ask(codePoint);
+    } catch {
+      answer = false;
+    }
+    cache.set(codePoint, answer);
+    return answer;
+  };
+}
+
+/**
+ * Embeds Carlito plus a font for each script the document uses, or returns null
+ * if Carlito itself cannot be loaded.
+ *
+ * Latin is all-or-nothing on purpose: mixing Carlito with a standard-14 fallback
+ * inside one document would give it two sets of metrics and inconsistent line
+ * breaks, which is worse than consistently using the old fonts. A per-script
+ * failure is not fatal, though — those characters are reported as undrawable and
+ * the rest of the document still converts.
+ */
+export async function loadFonts(
+  pdf: PDFDocument,
+  needs: StyleNeeds,
+  scripts: Iterable<string>,
+  source: FontSource,
+): Promise<LoadedFonts | null> {
+  let fontkit: typeof import('fontkit');
+  try {
+    // Dynamic so a page that never converts anything does not pay for it.
+    fontkit = await import('fontkit');
+    pdf.registerFontkit(fontkit as Parameters<PDFDocument['registerFontkit']>[0]);
+  } catch {
+    return null;
+  }
+
+  const sets = new Map<string, FontSet>();
+  const missing: string[] = [];
+
+  /* ---- Latin, required ---- */
+  try {
+    const wanted = stylesFor(needs);
+    const bytes = new Map<StyleKey, Uint8Array>();
+    await Promise.all(
+      wanted.map(async (key) => {
+        bytes.set(key, await source(LATIN_FONT_FILE[key]));
+      }),
+    );
+
+    const embedded = new Map<StyleKey, PDFFont>();
+    for (const key of wanted) {
+      // subset:true is required — see the notes at the top of this file.
+      embedded.set(key, await pdf.embedFont(bytes.get(key)!, { subset: true }));
+    }
+
+    const regular = embedded.get('regular');
+    if (!regular) return null;
+
+    sets.set(LATIN, {
+      // Unused styles reuse regular so the record is always complete. They are
+      // never drawn with, because no run asked for them.
+      faces: {
+        regular,
+        bold: embedded.get('bold') ?? regular,
+        italic: embedded.get('italic') ?? regular,
+        boldItalic: embedded.get('boldItalic') ?? regular,
+      },
+      hasGlyph: glyphProbe(fontkit, bytes.get('regular')!),
+    });
+  } catch {
+    return null;
+  }
+
+  /* ---- one file per script, each optional ---- */
+  for (const key of scripts) {
+    if (key === LATIN || sets.has(key)) continue;
+    const meta = scriptFont(key);
+    if (!meta) {
+      missing.push(key);
+      continue;
+    }
+    try {
+      const bytes = await source(meta.file);
+      const face = await pdf.embedFont(bytes, { subset: true });
+      // Noto ships one weight per script here, so bold and italic reuse it.
+      // Synthesising either would need a variable-font instance pdf-lib cannot
+      // build, and drawing the regular weight beats drawing nothing.
+      sets.set(key, {
+        faces: { regular: face, bold: face, italic: face, boldItalic: face },
+        hasGlyph: glyphProbe(fontkit, bytes),
+      });
+    } catch {
+      missing.push(key);
+    }
+  }
+
+  const hasGlyph = (codePoint: number): boolean => {
+    const set = sets.get(scriptKeyFor(codePoint));
+    return set ? set.hasGlyph(codePoint) : false;
+  };
+
+  return { sets, hasGlyph, missing };
 }

@@ -13,7 +13,7 @@ import { LAYOUT_CAVEATS } from '../../lib/docx/topdf';
       accept="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
       icon="file-text"
       label="Choose a .docx, or drop one anywhere"
-      hint="Converted in this tab. The text stays real text — selectable, searchable and copyable."
+      hint="Converted in this tab. The text stays real text — selectable, searchable and copyable — in Latin, Indic, Arabic, Hebrew and Thai scripts."
     />
 
     <section class="panel" id="wp-form" hidden>
@@ -48,7 +48,14 @@ import { LAYOUT_CAVEATS } from '../../lib/docx/topdf';
         <p>
           Headings, paragraphs, bold and italic, bullet and numbered lists,
           tables and inline images all come across, and the text remains
-          selectable. These do not:
+          selectable. Line breaks match Word closely, because the text is
+          measured with a font metrically identical to Calibri.
+        </p>
+        <p>
+          Hindi, Marathi, Bengali, Tamil, Telugu, Gujarati, Punjabi, Kannada,
+          Malayalam, Odia, Arabic, Hebrew and Thai are supported, alongside
+          Cyrillic, Greek and Vietnamese. Only the fonts your document needs are
+          downloaded. These are the things that still do not come across:
         </p>
         <ul>
           {LAYOUT_CAVEATS.map((c) => <li>{c}</li>)}
