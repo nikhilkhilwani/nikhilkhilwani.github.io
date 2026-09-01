@@ -396,7 +396,14 @@ export interface CompareStats {
   removed: number;
   changed: number;
   unchanged: number;
-  /** 0..1, share of lines that came through untouched. */
+  /**
+   * 0..1, weighted by characters rather than lines.
+   *
+   * Word-granular, not character-granular: it credits the `equal` segments the
+   * word diff already produced, so the number always agrees with what is
+   * highlighted on screen. "world" -> "worlt" is one changed word, so it counts
+   * as changed in full rather than as four matching letters.
+   */
   similarity: number;
 }
 
@@ -470,9 +477,43 @@ export function compareTexts(
     }
   }
 
-  const touched = stats.added + stats.removed + stats.changed;
-  const total = touched + stats.unchanged;
-  stats.similarity = total === 0 ? 1 : stats.unchanged / total;
+  /* ---- similarity, weighted by characters rather than lines ---- */
 
+  // Counting whole lines collapses to 0% the moment every line has been
+  // touched, however slightly — fixing a typo on each of a hundred lines
+  // reported "0% similar", which is not what the reader is looking at. The word
+  // diff has already run for every replace row, so reusing its `equal` segments
+  // costs nothing and keeps the number consistent with the highlighting.
+  //
+  // 2M/(L+R) is the Dice ratio, the same one difflib reports: exactly 1 for
+  // identical input, 0 with nothing in common, and symmetric — so Swap sides
+  // cannot change the figure.
+  const equalChars = (parts: Segment[] | undefined): number =>
+    parts ? parts.reduce((n, part) => (part.op === 'equal' ? n + part.text.length : n), 0) : 0;
+
+  let matched = 0;
+  let leftChars = 0;
+  let rightChars = 0;
+
+  for (const row of rows) {
+    leftChars += row.left?.length ?? 0;
+    rightChars += row.right?.length ?? 0;
+
+    if (row.op === 'equal') {
+      // ignoreCase and ignoreWhitespace both let a row be "equal" while the two
+      // raw sides differ in length, so credit only what both sides can back.
+      matched += Math.min(row.left?.length ?? 0, row.right?.length ?? 0);
+    } else if (row.op === 'replace') {
+      matched += Math.min(equalChars(row.leftParts), equalChars(row.rightParts));
+    }
+    // A plain delete or insert has no counterpart, so it matches nothing.
+  }
+
+  const chars = leftChars + rightChars;
+  // Line separators are not in row.left/right, so an empty pair has no
+  // characters at all — and two empty texts are identical, not 0% similar.
+  stats.similarity = chars === 0 ? 1 : (2 * matched) / chars;
+
+  const touched = stats.added + stats.removed + stats.changed;
   return { rows, stats, identical: touched === 0, truncated: diff.truncated };
 }

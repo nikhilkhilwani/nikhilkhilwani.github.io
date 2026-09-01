@@ -2660,6 +2660,53 @@ eq(
   eq(empty.rows.length, 0, 'with no rows');
 }
 
+/* ---- similarity is weighted by characters, not lines ---- */
+
+{
+  // The bug this replaced: line-granular similarity reported 0% whenever every
+  // line had been touched, however slightly, which is the single-line case
+  // every visitor hits first.
+  const typo = compareTexts('hello world', 'hello worlt');
+  eq(typo.stats.changed, 1, 'one line changed');
+  eq(typo.stats.added, 0, 'nothing added');
+  eq(typo.stats.removed, 0, 'nothing removed');
+  eq(typo.stats.unchanged, 0, 'and nothing came through untouched');
+  ok(typo.stats.similarity > 0, `a one-word change is no longer 0% similar (${(typo.stats.similarity * 100).toFixed(1)}%)`);
+  ok(typo.stats.similarity < 1, 'but it is not 100% either');
+  // 'hello ' matches on both sides, 'world'/'worlt' does not: 2*6/22.
+  near(typo.stats.similarity, 12 / 22, 1e-9, 'and equals the Dice ratio over the equal segments');
+
+  // The motivating case: a typo fixed on every line of a longer file used to
+  // report 0% similar because no line survived untouched.
+  const everyLine = compareTexts(
+    Array.from({ length: 20 }, (_, i) => `line ${i} of the document text`).join('\n'),
+    Array.from({ length: 20 }, (_, i) => `line ${i} of the document texts`).join('\n'),
+  );
+  eq(everyLine.stats.unchanged, 0, 'no line survives untouched');
+  ok(everyLine.stats.similarity > 0.7, `yet the texts read as mostly similar (${(everyLine.stats.similarity * 100).toFixed(1)}%)`);
+
+  // Symmetric, so Swap sides cannot change the number.
+  const ab = compareTexts('alpha beta\ngamma', 'alpha delta\ngamma');
+  const ba = compareTexts('alpha delta\ngamma', 'alpha beta\ngamma');
+  near(ab.stats.similarity, ba.stats.similarity, 1e-12, 'swapping the sides gives the same similarity');
+
+  // Nothing in common at all.
+  eq(compareTexts('aaa', 'bbb').stats.similarity, 0, 'wholly different lines are 0% similar');
+  eq(compareTexts('content', '').stats.similarity, 0, 'text against nothing is 0% similar');
+  eq(compareTexts('', '').stats.similarity, 1, 'two empty sides are 100%, not a divide by zero');
+
+  // Bounded for every shape of input, including the truncated path.
+  const long = (n, word) => Array.from({ length: n }, (_, i) => `${word} ${i}`).join('\n');
+  for (const [l, r, what] of [
+    ['a\nb\nc', 'X', 'lopsided'],
+    [long(600, 'alpha'), long(600, 'omega'), 'truncated/unrelated'],
+    ['same', 'same', 'identical'],
+  ]) {
+    const s = compareTexts(l, r).stats.similarity;
+    ok(s >= 0 && s <= 1, `similarity stays within 0..1 (${what}: ${s.toFixed(3)})`);
+  }
+}
+
 /* ---- the guards that keep it responsive ---- */
 
 {
