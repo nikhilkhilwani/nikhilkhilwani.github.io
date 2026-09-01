@@ -1,0 +1,465 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Icon from '../../components/Icon.astro';
+---
+
+<ToolLayout slug="text-compare">
+  <div class="tc">
+    <section class="panel">
+      <div class="tc__inputs">
+        <div class="field">
+          <label for="tc-left">Original</label>
+          <textarea
+            id="tc-left"
+            rows="12"
+            spellcheck="false"
+            placeholder="Paste the original text"></textarea>
+          <div class="tc__load">
+            <label class="tc__file">
+              <input id="tc-left-file" type="file" accept=".txt,.md,.csv,.json,.log,.xml,.html,.css,.js,.ts,text/*" />
+              <span>Load a file</span>
+            </label>
+            <span class="tc__count" id="tc-left-count"></span>
+          </div>
+        </div>
+
+        <div class="field">
+          <label for="tc-right">Changed</label>
+          <textarea
+            id="tc-right"
+            rows="12"
+            spellcheck="false"
+            placeholder="Paste the text to compare against it"></textarea>
+          <div class="tc__load">
+            <label class="tc__file">
+              <input id="tc-right-file" type="file" accept=".txt,.md,.csv,.json,.log,.xml,.html,.css,.js,.ts,text/*" />
+              <span>Load a file</span>
+            </label>
+            <span class="tc__count" id="tc-right-count"></span>
+          </div>
+        </div>
+      </div>
+
+      <fieldset class="tc__opts">
+        <legend class="eyebrow">Ignore</legend>
+        <label class="check"><input id="tc-case" type="checkbox" /> Letter case</label>
+        <label class="check"><input id="tc-space" type="checkbox" /> Whitespace</label>
+        <label class="check"><input id="tc-blank" type="checkbox" /> Blank lines</label>
+      </fieldset>
+
+      <div class="tc__actions">
+        <div class="tc__views" role="group" aria-label="View">
+          <button id="tc-view-split" class="btn btn--sm" type="button" aria-pressed="false">
+            Side by side
+          </button>
+          <button id="tc-view-unified" class="btn btn--sm" type="button" aria-pressed="true">
+            Unified
+          </button>
+        </div>
+        <button id="tc-swap" class="btn btn--sm" type="button">
+          <Icon name="compare" size={15} /> Swap sides
+        </button>
+        <button id="tc-patch" class="btn btn--sm" type="button">
+          <Icon name="download" size={15} /> Download .patch
+        </button>
+        <button id="tc-clear" class="btn btn--sm" type="button">
+          <Icon name="trash" size={15} /> Clear
+        </button>
+      </div>
+
+      <p class="tc__stats" id="tc-stats" role="status" aria-live="polite"></p>
+      <p class="tc__warn" id="tc-warn"></p>
+    </section>
+
+    <section class="tc__out" id="tc-out" aria-live="polite" aria-label="Differences"></section>
+  </div>
+</ToolLayout>
+
+<style>
+  .tc { display: grid; gap: clamp(14px, 2vw, 20px); }
+
+  .tc__inputs { display: grid; gap: 1.15rem; }
+  @media (min-width: 760px) {
+    .tc__inputs { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  }
+  .tc textarea {
+    font-family: var(--mono);
+    font-size: 0.84rem;
+    line-height: 1.6;
+    resize: vertical;
+    min-height: 180px;
+  }
+
+  .tc__load { display: flex; align-items: center; gap: 0.75rem; flex-wrap: wrap; }
+  /* The native control is unstyleable, so the label carries the button look and
+     the input itself is only visually hidden — never display:none, which would
+     take it out of the tab order. */
+  .tc__file {
+    position: relative;
+    overflow: hidden;
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+  .tc__file input {
+    position: absolute;
+    inset: 0;
+    opacity: 0;
+    width: 100%;
+    cursor: pointer;
+  }
+  .tc__file span {
+    font-size: 0.8rem;
+    color: var(--ink-dim);
+    border-bottom: 1px solid var(--line-strong);
+    padding-bottom: 1px;
+  }
+  .tc__file:hover span { color: var(--accent); border-bottom-color: var(--accent); }
+  .tc__count { font-family: var(--mono); font-size: 0.76rem; color: var(--ink-faint); }
+
+  .tc__opts {
+    border: 0;
+    padding: 0;
+    margin: 1.2rem 0 0;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem 1.4rem;
+    align-items: center;
+  }
+  .tc__opts legend { padding: 0; margin-bottom: 0.5rem; }
+  .check {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.5rem;
+    min-height: 44px;
+    font-size: 0.88rem;
+    color: var(--ink-dim);
+    cursor: pointer;
+  }
+  .check input { width: auto; min-height: 0; accent-color: var(--accent); }
+
+  .tc__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; margin-top: 1rem; }
+  .tc__views { display: flex; gap: 0.35rem; }
+  .tc__views .btn[aria-pressed='true'] {
+    border-color: var(--accent);
+    color: var(--ink);
+  }
+
+  .tc__stats {
+    margin: 1.1rem 0 0;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    color: var(--ink-dim);
+    min-height: 1em;
+  }
+  .tc__warn { margin: 0.4rem 0 0; font-size: 0.8rem; color: var(--warn); min-height: 1em; }
+
+  .tc__out:empty { display: none; }
+</style>
+
+<!-- The diff rows are built with document.createElement, and Astro appends
+     [data-astro-cid-…] to every selector in a scoped <style> — which created
+     nodes never carry, so a scoped rule would silently not apply. Namespaced
+     under this page's own container class instead. -->
+
+<style is:global>
+  .tc__out {
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    line-height: 1.65;
+  }
+
+  .tc__row { display: grid; border-bottom: 1px solid var(--line); }
+  .tc__row:last-child { border-bottom: 0; }
+  .tc__out[data-view='unified'] .tc__row { grid-template-columns: 3.5rem 1.4rem minmax(0, 1fr); }
+  .tc__out[data-view='split'] .tc__row {
+    grid-template-columns: 3.5rem minmax(0, 1fr) 3.5rem minmax(0, 1fr);
+  }
+
+  .tc__gutter {
+    padding: 0.3rem 0.5rem;
+    text-align: right;
+    color: var(--ink-faint);
+    background: var(--surface);
+    border-right: 1px solid var(--line);
+    user-select: none;
+    font-size: 0.72rem;
+  }
+  /* The sign is not decoration: colour alone would fail in print, in high
+     contrast, and for anyone who cannot distinguish red from green. */
+  .tc__sign {
+    padding: 0.3rem 0;
+    text-align: center;
+    color: var(--ink-faint);
+    user-select: none;
+  }
+  .tc__text {
+    padding: 0.3rem 0.6rem;
+    white-space: pre-wrap;
+    /* Long lines wrap rather than scrolling the page sideways. */
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .tc__text--empty { background: var(--surface); }
+
+  .tc__row--insert .tc__text { background: color-mix(in srgb, var(--good) 14%, transparent); }
+  .tc__row--delete .tc__text { background: color-mix(in srgb, var(--bad) 14%, transparent); }
+  .tc__row--replace .tc__text { background: color-mix(in srgb, var(--warn) 12%, transparent); }
+  .tc__row--insert .tc__sign,
+  .tc__row--replace .tc__sign { color: var(--good); }
+  .tc__row--delete .tc__sign { color: var(--bad); }
+
+  /* Word-level highlight inside a changed line. */
+  .tc__word--insert {
+    background: color-mix(in srgb, var(--good) 32%, transparent);
+    border-radius: 2px;
+  }
+  .tc__word--delete {
+    background: color-mix(in srgb, var(--bad) 32%, transparent);
+    border-radius: 2px;
+  }
+
+  .tc__same {
+    padding: 0.6rem;
+    text-align: center;
+    color: var(--ink-dim);
+    font-family: var(--sans);
+    font-size: 0.85rem;
+  }
+</style>
+
+<script>
+  import { compareTexts, splitLines, type Row, type Segment } from '../../lib/text/diff';
+  import { diffLines } from '../../lib/text/diff';
+  import { toUnifiedDiff, countHunks } from '../../lib/text/patch';
+  import { downloadBlob } from '../../lib/ui/download';
+  import { toast } from '../../lib/ui/clipboard';
+  import { LIMITS, formatLimit } from '../../lib/ui/limits';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const left = $<HTMLTextAreaElement>('tc-left');
+  const right = $<HTMLTextAreaElement>('tc-right');
+  const leftFile = $<HTMLInputElement>('tc-left-file');
+  const rightFile = $<HTMLInputElement>('tc-right-file');
+  const leftCount = $<HTMLElement>('tc-left-count');
+  const rightCount = $<HTMLElement>('tc-right-count');
+  const optCase = $<HTMLInputElement>('tc-case');
+  const optSpace = $<HTMLInputElement>('tc-space');
+  const optBlank = $<HTMLInputElement>('tc-blank');
+  const viewSplit = $<HTMLButtonElement>('tc-view-split');
+  const viewUnified = $<HTMLButtonElement>('tc-view-unified');
+  const swapBtn = $<HTMLButtonElement>('tc-swap');
+  const patchBtn = $<HTMLButtonElement>('tc-patch');
+  const clearBtn = $<HTMLButtonElement>('tc-clear');
+  const stats = $<HTMLElement>('tc-stats');
+  const warn = $<HTMLElement>('tc-warn');
+  const out = $<HTMLElement>('tc-out');
+
+  // Side by side is unreadable on a phone: two columns of monospace in 320px is
+  // four or five characters each. Unified is the honest default there.
+  let view: 'split' | 'unified' = window.matchMedia('(min-width: 760px)').matches
+    ? 'split'
+    : 'unified';
+
+  const options = () => ({
+    ignoreCase: optCase.checked,
+    ignoreWhitespace: optSpace.checked,
+    ignoreBlankLines: optBlank.checked,
+  });
+
+  function setView(next: 'split' | 'unified') {
+    view = next;
+    viewSplit.setAttribute('aria-pressed', String(next === 'split'));
+    viewUnified.setAttribute('aria-pressed', String(next === 'unified'));
+    render();
+  }
+
+  function cell(className: string, text?: string, parts?: Segment[]): HTMLElement {
+    const node = document.createElement('div');
+    node.className = className;
+    if (parts && parts.length) {
+      for (const part of parts) {
+        if (part.op === 'equal') {
+          node.append(document.createTextNode(part.text));
+        } else {
+          const mark = document.createElement('span');
+          mark.className = part.op === 'insert' ? 'tc__word--insert' : 'tc__word--delete';
+          mark.textContent = part.text;
+          node.append(mark);
+        }
+      }
+    } else if (text !== undefined) {
+      node.textContent = text;
+    }
+    return node;
+  }
+
+  function gutter(value?: number): HTMLElement {
+    const node = document.createElement('div');
+    node.className = 'tc__gutter';
+    node.textContent = value === undefined ? '' : String(value);
+    return node;
+  }
+
+  /** One row in unified view: a single text column with a +/-/space sign. */
+  function unifiedRows(row: Row): HTMLElement[] {
+    const make = (
+      sign: string,
+      kind: Row['op'],
+      leftNo: number | undefined,
+      rightNo: number | undefined,
+      text: string | undefined,
+      parts?: Segment[],
+    ) => {
+      const node = document.createElement('div');
+      node.className = `tc__row tc__row--${kind}`;
+      const signCell = document.createElement('div');
+      signCell.className = 'tc__sign';
+      signCell.textContent = sign;
+      node.append(gutter(rightNo ?? leftNo), signCell, cell('tc__text', text, parts));
+      return node;
+    };
+
+    if (row.op === 'equal') return [make(' ', 'equal', row.leftNumber, row.rightNumber, row.left)];
+    if (row.op === 'insert') return [make('+', 'insert', undefined, row.rightNumber, row.right)];
+    if (row.op === 'delete') return [make('-', 'delete', row.leftNumber, undefined, row.left)];
+    // A changed line shows both halves, so the change is readable in one column.
+    return [
+      make('-', 'delete', row.leftNumber, undefined, undefined, row.leftParts),
+      make('+', 'insert', undefined, row.rightNumber, undefined, row.rightParts),
+    ];
+  }
+
+  function splitRow(row: Row): HTMLElement {
+    const node = document.createElement('div');
+    node.className = `tc__row tc__row--${row.op}`;
+    node.append(
+      gutter(row.leftNumber),
+      row.left === undefined
+        ? cell('tc__text tc__text--empty')
+        : cell('tc__text', row.op === 'replace' ? undefined : row.left, row.leftParts),
+      gutter(row.rightNumber),
+      row.right === undefined
+        ? cell('tc__text tc__text--empty')
+        : cell('tc__text', row.op === 'replace' ? undefined : row.right, row.rightParts),
+    );
+    return node;
+  }
+
+  function render() {
+    const a = left.value;
+    const b = right.value;
+
+    leftCount.textContent = a ? `${splitLines(a).length} lines` : '';
+    rightCount.textContent = b ? `${splitLines(b).length} lines` : '';
+
+    if (!a && !b) {
+      out.replaceChildren();
+      out.removeAttribute('data-view');
+      stats.textContent = '';
+      warn.textContent = '';
+      return;
+    }
+
+    const result = compareTexts(a, b, options());
+
+    out.dataset.view = view;
+    const rows = document.createDocumentFragment();
+
+    if (result.identical) {
+      const same = document.createElement('p');
+      same.className = 'tc__same';
+      same.textContent = 'The two sides are identical.';
+      rows.append(same);
+    } else {
+      for (const row of result.rows) {
+        if (view === 'unified') rows.append(...unifiedRows(row));
+        else rows.append(splitRow(row));
+      }
+    }
+    out.replaceChildren(rows);
+
+    const percent = Math.round(result.stats.similarity * 1000) / 10;
+    stats.textContent = result.identical
+      ? `Identical · ${result.stats.unchanged} lines`
+      : `${result.stats.added} added · ${result.stats.removed} removed · ` +
+        `${result.stats.changed} changed · ${result.stats.unchanged} unchanged · ${percent}% similar`;
+
+    warn.textContent = result.truncated
+      ? 'These texts differ too much to line up sensibly, so they are shown as wholly replaced.'
+      : '';
+  }
+
+  /* ---------------------------------------------------------- interactions */
+
+  // Debounced: compare on every keystroke is wasteful on a long paste, and the
+  // measured worst case is over a second at fifty thousand lines.
+  let timer: number | undefined;
+  const schedule = () => {
+    window.clearTimeout(timer);
+    timer = window.setTimeout(render, 180);
+  };
+
+  for (const node of [left, right]) node.addEventListener('input', schedule);
+  for (const node of [optCase, optSpace, optBlank]) node.addEventListener('change', render);
+
+  viewSplit.addEventListener('click', () => setView('split'));
+  viewUnified.addEventListener('click', () => setView('unified'));
+
+  swapBtn.addEventListener('click', () => {
+    const held = left.value;
+    left.value = right.value;
+    right.value = held;
+    render();
+  });
+
+  clearBtn.addEventListener('click', () => {
+    left.value = '';
+    right.value = '';
+    render();
+  });
+
+  patchBtn.addEventListener('click', () => {
+    if (!left.value && !right.value) {
+      toast('Nothing to compare yet');
+      return;
+    }
+    const diff = diffLines(left.value, right.value, options());
+    const patch = toUnifiedDiff(diff, { leftName: 'a/original.txt', rightName: 'b/changed.txt' });
+    if (!patch) {
+      toast('No differences to export');
+      return;
+    }
+    downloadBlob(new Blob([patch], { type: 'text/x-patch' }), 'changes.patch');
+    toast(`${countHunks(patch)} hunk${countHunks(patch) === 1 ? '' : 's'} exported`);
+  });
+
+  async function loadInto(input: HTMLInputElement, target: HTMLTextAreaElement) {
+    const file = input.files?.[0];
+    if (!file) return;
+    if (file.size > LIMITS.image) {
+      warn.textContent = `That file is larger than ${formatLimit(LIMITS.image)}.`;
+      input.value = '';
+      return;
+    }
+    try {
+      target.value = await file.text();
+      warn.textContent = '';
+      render();
+    } catch {
+      warn.textContent = 'That file could not be read as text.';
+    } finally {
+      // Cleared so choosing the same file twice still fires a change event.
+      input.value = '';
+    }
+  }
+
+  leftFile.addEventListener('change', () => void loadInto(leftFile, left));
+  rightFile.addEventListener('change', () => void loadInto(rightFile, right));
+
+  setView(view);
+</script>

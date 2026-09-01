@@ -1,4 +1,4 @@
-export type ToolCategory = 'image' | 'pdf';
+export type ToolCategory = 'image' | 'pdf' | 'text';
 export type ToolStatus = 'available' | 'coming-soon';
 
 export interface ToolMeta {
@@ -15,6 +15,7 @@ export interface ToolMeta {
 export const TOOL_CATEGORIES: { id: ToolCategory; label: string; blurb: string }[] = [
   { id: 'image', label: 'Image & QR', blurb: 'Reshape images without uploading them.' },
   { id: 'pdf', label: 'PDF', blurb: 'Convert, compress, and secure documents in-tab.' },
+  { id: 'text', label: 'Text', blurb: 'Compare and inspect text without it leaving the tab.' },
 ];
 
 /**
@@ -88,6 +89,15 @@ export const tools: ToolMeta[] = [
     icon: 'unlock',
     status: 'available',
     category: 'pdf',
+  },
+  {
+    slug: 'text-compare',
+    title: 'Text Compare',
+    description:
+      'Diff two pieces of text line by line, with the changed words highlighted. Export a unified patch.',
+    icon: 'compare',
+    status: 'available',
+    category: 'text',
   },
 ];
 

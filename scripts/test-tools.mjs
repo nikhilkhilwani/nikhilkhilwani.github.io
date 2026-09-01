@@ -44,6 +44,11 @@ import {
 } from '../src/lib/docx/furniture.ts';
 import { reorderTokens } from '../src/lib/docx/bidi.ts';
 import {
+  splitLines, splitWords, normaliseLine, diffLines, applyEdits, diffWords, compareTexts,
+  DEFAULT_MAX_EDITS,
+} from '../src/lib/text/diff.ts';
+import { toUnifiedDiff, countHunks } from '../src/lib/text/patch.ts';
+import {
   splitNotes, markersIn, markerId, backReferenceId,
 } from '../src/lib/docx/footnotes.ts';
 import bidiFactory from 'bidi-js';
@@ -2455,6 +2460,267 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
     ok(after !== undefined, 'the text after the tab survives');
     ok(after.x >= 85, `and starts at the stop (${after.x.toFixed(1)})`);
   }
+}
+
+
+/* ============================================================ text compare */
+
+/* ---- line splitting: the source of phantom trailing lines ---- */
+
+deep(splitLines(''), [], 'empty text is no lines at all');
+deep(splitLines('a'), ['a'], 'one line with no terminator');
+deep(splitLines('a\n'), ['a'], 'a trailing newline does NOT invent a second line');
+deep(splitLines('a\nb'), ['a', 'b'], 'two lines');
+deep(splitLines('a\nb\n'), ['a', 'b'], 'two lines with a terminator');
+deep(splitLines('a\r\nb'), ['a', 'b'], 'CRLF is normalised');
+deep(splitLines('a\rb'), ['a', 'b'], 'a lone CR is normalised too');
+deep(splitLines('\n'), [''], 'a single newline is one empty line');
+deep(splitLines('a\n\nb'), ['a', '', 'b'], 'a blank line in the middle is kept');
+
+/* ---- the comparison key ---- */
+
+eq(normaliseLine('  Hello   World  ', {}), '  Hello   World  ', 'no options changes nothing');
+eq(normaliseLine('  Hello   World  ', { ignoreWhitespace: true }), 'Hello World', 'whitespace collapses and trims');
+eq(normaliseLine('Hello', { ignoreCase: true }), 'hello', 'case folds');
+eq(
+  normaliseLine('  HELLO   world ', { ignoreCase: true, ignoreWhitespace: true }),
+  'hello world',
+  'both together',
+);
+
+/* ---- the invariant: applying a diff to the left reproduces the right ---- */
+
+{
+  // This one assertion catches almost any indexing slip in Myers or in the
+  // prefix/suffix trimming, which is why it is a property over random input
+  // rather than a handful of examples.
+  const rnd = (n) => Math.floor(Math.random() * n);
+  const word = () => 'abcdefghij'[rnd(10)].repeat(1 + rnd(3));
+  const line = () => Array.from({ length: 1 + rnd(5) }, word).join(' ');
+
+  let mismatched = 0;
+  let firstFailure = null;
+
+  for (let trial = 0; trial < 1200; trial++) {
+    const a = Array.from({ length: rnd(14) }, line);
+    const b = [...a];
+    for (let edit = 0; edit < rnd(6); edit++) {
+      const kind = rnd(3);
+      if (kind === 0 && b.length) b.splice(rnd(b.length), 1);
+      else if (kind === 1) b.splice(rnd(b.length + 1), 0, line());
+      else if (b.length) b[rnd(b.length)] = line();
+    }
+    const leftText = a.join('\n');
+    const rightText = b.join('\n');
+    const diff = diffLines(leftText, rightText);
+    if (applyEdits(diff).join('\n') !== rightText) {
+      mismatched++;
+      firstFailure ??= { leftText, rightText, got: applyEdits(diff).join('\n') };
+    }
+  }
+  eq(mismatched, 0, `applying the diff reproduces the right side (1200 derived pairs)${firstFailure ? ` — first failure ${JSON.stringify(firstFailure)}` : ''}`);
+
+  // Unrelated pairs exercise the large-D path rather than the near-identical one.
+  let unrelatedBad = 0;
+  for (let trial = 0; trial < 600; trial++) {
+    const leftText = Array.from({ length: rnd(12) }, line).join('\n');
+    const rightText = Array.from({ length: rnd(12) }, line).join('\n');
+    const diff = diffLines(leftText, rightText, { minOverlap: 0 });
+    if (!diff.truncated && applyEdits(diff).join('\n') !== rightText) unrelatedBad++;
+  }
+  eq(unrelatedBad, 0, 'and for unrelated pairs too (600 of them)');
+}
+
+/* ---- the shapes that break naive implementations ---- */
+
+{
+  const editsOf = (a, b, options) => diffLines(a, b, options).edits.map((e) => e.op).join(',');
+
+  eq(editsOf('a\nb\nc', 'a\nb\nc'), 'equal,equal,equal', 'identical text is all equal');
+  eq(editsOf('', 'a\nb'), 'insert,insert', 'empty against text is all inserts');
+  eq(editsOf('a\nb', ''), 'delete,delete', 'text against empty is all deletes');
+  eq(editsOf('', ''), '', 'two empties produce no edits');
+  eq(editsOf('a\nb\nc', 'a\nc'), 'equal,delete,equal', 'a removed middle line');
+  eq(editsOf('a\nc', 'a\nb\nc'), 'equal,insert,equal', 'an added middle line');
+
+  // Trimming the common ends must not change the answer.
+  const long = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+  const changed = [...long];
+  changed[20] = 'CHANGED';
+  const trimmed = diffLines(long.join('\n'), changed.join('\n'));
+  const untrimmed = diffLines(long.join('\n'), changed.join('\n'), { minOverlap: 0 });
+  eq(
+    trimmed.edits.map((e) => e.op).join(','),
+    untrimmed.edits.map((e) => e.op).join(','),
+    'prefix/suffix trimming yields the same edit script',
+  );
+  eq(applyEdits(trimmed).join('\n'), changed.join('\n'), 'and still reproduces the right side');
+}
+
+/* ---- options actually change the result ---- */
+
+{
+  const changes = (a, b, options) =>
+    diffLines(a, b, options).edits.filter((e) => e.op !== 'equal').length;
+
+  ok(changes('Hello', 'hello') > 0, 'case matters by default');
+  eq(changes('Hello', 'hello', { ignoreCase: true }), 0, 'and can be ignored');
+
+  ok(changes('a  b', 'a b') > 0, 'whitespace matters by default');
+  eq(changes('a  b', 'a b', { ignoreWhitespace: true }), 0, 'and can be ignored');
+
+  ok(changes('a\n\nb', 'a\nb') > 0, 'a blank line is a difference by default');
+  eq(changes('a\n\nb', 'a\nb', { ignoreBlankLines: true }), 0, 'and can be ignored');
+
+  // Ignoring blank lines must still report REAL line numbers, or the gutter
+  // would point at the wrong line in the textarea.
+  const diff = diffLines('a\n\n\nZ', 'a\n\n\nY', { ignoreBlankLines: true });
+  const deletion = diff.edits.find((e) => e.op === 'delete');
+  eq(deletion.a, 3, 'a line number survives blank-line skipping');
+  eq(diff.left[deletion.a], 'Z', 'and points at the right line');
+
+  // EQUAL rows need real line numbers too. Nothing covered them, and mapping
+  // the filtered index straight through went unnoticed: it reports the
+  // position within the non-blank lines, not the line in the textarea.
+  const equalRows = diffLines('a\n\n\nb\nZ', 'a\n\n\nb\nY', { ignoreBlankLines: true }).edits
+    .filter((edit) => edit.op === 'equal');
+  deep(equalRows.map((edit) => edit.a), [0, 3], 'equal rows keep the real left line numbers');
+  deep(equalRows.map((edit) => edit.b), [0, 3], 'and the real right ones');
+}
+
+/* ---- word level ---- */
+
+{
+  deep(splitWords('a b'), ['a', ' ', 'b'], 'separators are kept as tokens');
+  deep(splitWords(''), [], 'empty text has no words');
+  eq(splitWords('  a  ').join(''), '  a  ', 'rebuilding from tokens loses no spacing');
+
+  const parts = diffWords('the quick brown fox', 'the slow brown fox');
+  eq(parts.left.map((p) => p.text).join(''), 'the quick brown fox', 'the left side rebuilds exactly');
+  eq(parts.right.map((p) => p.text).join(''), 'the slow brown fox', 'and the right side too');
+  ok(
+    parts.left.some((p) => p.op === 'delete' && p.text.includes('quick')),
+    'the changed word is marked on the left',
+  );
+  ok(
+    parts.right.some((p) => p.op === 'insert' && p.text.includes('slow')),
+    'and on the right',
+  );
+  ok(
+    parts.left.some((p) => p.op === 'equal' && p.text.includes('brown')),
+    'the unchanged words are not marked',
+  );
+
+  const same = diffWords('identical line', 'identical line');
+  ok(same.left.every((p) => p.op === 'equal'), 'an unchanged line has no marked words');
+}
+
+/* ---- display rows and stats ---- */
+
+{
+  const result = compareTexts('one\ntwo\nthree', 'one\ntwo changed\nthree');
+  deep(result.rows.map((r) => r.op), ['equal', 'replace', 'equal'], 'a modified line is one replace row');
+  eq(result.identical, false, 'and the sides are not identical');
+  eq(result.stats.changed, 1, 'counted as changed');
+  eq(result.stats.added, 0, 'not as an addition');
+  eq(result.stats.removed, 0, 'nor a removal');
+  eq(result.stats.unchanged, 2, 'two lines came through');
+  // The left side has ONE segment here, because nothing was deleted from it —
+  // 'two' -> 'two changed' is a pure insertion. Assert what is true: the
+  // segments rebuild each side, and the addition is marked on the right.
+  eq(
+    result.rows[1].leftParts.map((part) => part.text).join(''),
+    'two',
+    'the replace row rebuilds its left side from segments',
+  );
+  eq(
+    result.rows[1].rightParts.map((part) => part.text).join(''),
+    'two changed',
+    'and its right side',
+  );
+  ok(
+    result.rows[1].rightParts.some((part) => part.op === 'insert'),
+    'with the added words marked',
+  );
+  eq(result.rows[1].leftNumber, 2, 'with the left line number');
+  eq(result.rows[1].rightNumber, 2, 'and the right one');
+
+  const identical = compareTexts('same\ntext', 'same\ntext');
+  eq(identical.identical, true, 'identical input is reported as such');
+  eq(identical.stats.similarity, 1, 'at 100% similarity');
+
+  // An unequal number of deletions and insertions: the surplus stays plain.
+  const lopsided = compareTexts('a\nb\nc', 'X');
+  const ops = lopsided.rows.map((r) => r.op);
+  eq(ops.filter((op) => op === 'replace').length, 1, 'one line pairs up as a replace');
+  eq(ops.filter((op) => op === 'delete').length, 2, 'and the surplus deletions stay deletions');
+
+  const empty = compareTexts('', '');
+  eq(empty.identical, true, 'two empty sides are identical');
+  eq(empty.rows.length, 0, 'with no rows');
+}
+
+/* ---- the guards that keep it responsive ---- */
+
+{
+  const line = (i) => `line ${i} with some words`;
+  const build = (n, edit) => Array.from({ length: n }, (_, i) => edit(i) ?? line(i)).join('\n');
+
+  // Unrelated text is the pathological case for Myers, and is caught in O(N+M)
+  // by the overlap check rather than by exhausting the edit budget.
+  const unrelated = compareTexts(build(600, () => null), build(600, (i) => `entirely other ${i}`));
+  eq(unrelated.truncated, true, 'unrelated text is reported whole rather than diffed');
+
+  // Overlapping text of the same size is NOT caught by that check.
+  const overlapping = compareTexts(build(600, () => null), build(600, (i) => (i % 50 === 0 ? `EDIT ${i}` : null)));
+  eq(overlapping.truncated, false, 'similar text of the same size is diffed properly');
+  eq(overlapping.stats.changed, 12, 'and every change is found');
+
+  // Small inputs are never short-circuited, however different they are.
+  const small = compareTexts('a\nb\nc', 'x\ny\nz');
+  eq(small.truncated, false, 'a small unrelated pair is still diffed');
+
+  ok(DEFAULT_MAX_EDITS > 0 && DEFAULT_MAX_EDITS <= 10_000, `the edit budget is bounded (${DEFAULT_MAX_EDITS})`);
+}
+
+/* ---- unified patch output ---- */
+
+{
+  const patch = (a, b, options) => toUnifiedDiff(diffLines(a, b), options);
+
+  eq(patch('same', 'same'), '', 'no differences produces no patch at all');
+
+  const simple = patch('one\ntwo\nthree', 'one\nTWO\nthree');
+  ok(simple.startsWith('--- left\n+++ right\n'), 'the header names both sides');
+  eq(countHunks(simple), 1, 'one change is one hunk');
+  ok(simple.includes('-two'), 'the removed line is marked');
+  ok(simple.includes('+TWO'), 'the added line is marked');
+  ok(simple.includes(' one'), 'context lines carry a leading space');
+  ok(simple.endsWith('\n'), 'the patch ends with a newline');
+
+  const named = patch('a', 'b', { leftName: 'a/f.txt', rightName: 'b/f.txt' });
+  ok(named.includes('--- a/f.txt'), 'the left name is used');
+  ok(named.includes('+++ b/f.txt'), 'and the right one');
+
+  // Hunk grouping: changes further apart than twice the context are separate.
+  const long = Array.from({ length: 40 }, (_, i) => `line ${i}`);
+  const far = [...long];
+  far[2] = 'EDIT A';
+  far[30] = 'EDIT B';
+  eq(countHunks(patch(long.join('\n'), far.join('\n'))), 2, 'distant changes make two hunks');
+
+  const near = [...long];
+  near[10] = 'EDIT A';
+  near[12] = 'EDIT B';
+  eq(countHunks(patch(long.join('\n'), near.join('\n'))), 1, 'nearby changes merge into one hunk');
+
+  // A hunk header counts lines, and a side with none is anchored at 0.
+  const added = patch('', 'brand new');
+  ok(/@@ -0(?:,0)? \+1 @@/.test(added), `an empty left side is anchored at 0 (${added.split('\n')[2]})`);
+  const removed = patch('gone', '');
+  ok(/@@ -1 \+0(?:,0)? @@/.test(removed), `an empty right side is anchored at 0 (${removed.split('\n')[2]})`);
+
+  eq(countHunks(''), 0, 'an empty patch has no hunks');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
