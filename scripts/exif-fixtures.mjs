@@ -317,6 +317,75 @@ export function buildJpeg({
   return concat(pieces);
 }
 
+const jpegTables = () => [
+  jpegSegment(0xdb, concat([bytes(0), new Uint8Array(64).fill(0x10)])),
+  jpegSegment(0xc4, concat([bytes(0x00), new Uint8Array(16).fill(0), bytes(0)])),
+];
+
+const jpegScan = () => bytes(0x3a, 0x91, 0xff, 0x00, 0x2c, 0xff, 0xd0, 0x7e, 0x1b);
+
+const jfif = () => jpegSegment(0xe0, concat([str('JFIF'), bytes(0, 1, 1, 0, 0, 1, 0, 1, 0, 0)]));
+
+/**
+ * What a messaging app sends: re-encoded, with every metadata segment gone and
+ * only the JFIF density header left. A tool reporting "clean" here is correct,
+ * and the fixture exists so that claim is provable rather than assumed.
+ */
+export function buildStrippedJpeg() {
+  return concat([
+    bytes(0xff, 0xd8),
+    jfif(),
+    ...jpegTables(),
+    jpegSegment(0xc0, bytes(8, 0, 16, 0, 16, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1)),
+    jpegSegment(0xda, bytes(3, 1, 0, 2, 0x11, 3, 0x11, 0, 63, 0)),
+    jpegScan(),
+    bytes(0xff, 0xd9),
+  ]);
+}
+
+/**
+ * A progressive JPEG: SOF2 and several scans, with a Huffman table appearing
+ * between two of them. Every scan has to be found, or a rebuild truncates the
+ * image at the first one.
+ */
+export function buildProgressiveJpeg({ exif = richExif({ orientation: 6 }) } = {}) {
+  return concat([
+    bytes(0xff, 0xd8),
+    jfif(),
+    ...(exif ? [jpegSegment(0xe1, concat([str('Exif'), bytes(0, 0), exif]))] : []),
+    ...jpegTables(),
+    jpegSegment(0xc2, bytes(8, 0, 16, 0, 16, 3, 1, 0x22, 0, 2, 0x11, 1, 3, 0x11, 1)),
+    jpegSegment(0xda, bytes(1, 1, 0, 0, 5, 0)),
+    jpegScan(),
+    jpegSegment(0xc4, concat([bytes(0x10), new Uint8Array(16).fill(0), bytes(0)])),
+    jpegSegment(0xda, bytes(1, 1, 0, 6, 63, 2)),
+    jpegScan(),
+    jpegSegment(0xda, bytes(2, 2, 0, 3, 0, 1, 63, 0)),
+    jpegScan(),
+    bytes(0xff, 0xd9),
+  ]);
+}
+
+/**
+ * Exif sitting behind other APP segments, with the two markers whose signatures
+ * carry NO terminating NUL: Adobe's APP14 colour transform, which must be kept,
+ * and APP12 'Ducky', which holds camera settings and must go.
+ */
+export function buildLateExifJpeg({ exif = richExif({ orientation: 8 }) } = {}) {
+  return concat([
+    bytes(0xff, 0xd8),
+    jfif(),
+    jpegSegment(0xec, concat([str('Ducky'), bytes(0, 1, 0, 4)])),
+    jpegSegment(0xee, concat([str('Adobe'), bytes(0x64, 0x00, 0x00, 0, 0, 0)])),
+    ...(exif ? [jpegSegment(0xe1, concat([str('Exif'), bytes(0, 0), exif]))] : []),
+    ...jpegTables(),
+    jpegSegment(0xc0, bytes(8, 0, 16, 0, 16, 1, 1, 0x11, 0)),
+    jpegSegment(0xda, bytes(1, 1, 0, 0, 63, 0)),
+    jpegScan(),
+    bytes(0xff, 0xd9),
+  ]);
+}
+
 /* -------------------------------------------------------------------------- */
 /* PNG — genuinely valid and decodable                                        */
 /* -------------------------------------------------------------------------- */

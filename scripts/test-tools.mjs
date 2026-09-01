@@ -27,6 +27,7 @@ import { readMetadata, summarise, describeReport as describeExif } from '../src/
 import { stripMetadata, imageDataOf, minimalOrientationTiff } from '../src/lib/exif/strip.ts';
 import {
   buildJpeg, buildPng, buildWebp, richExif, buildTiff, TYPE,
+  buildStrippedJpeg, buildProgressiveJpeg, buildLateExifJpeg,
 } from './exif-fixtures.mjs';
 import { parseColor, hexToRgb, rgbToHex } from '../src/lib/color/convert.ts';
 import { contrastRatio, relativeLuminance } from '../src/lib/contrast/wcag.ts';
@@ -3148,6 +3149,96 @@ const sameBytes = (a, b) => {
   const order = walkContainer(png.bytes).segments.map((seg) => seg.where);
   ok(order.indexOf('eXIf') < order.indexOf('IDAT'), 'placed before the image data, as the spec asks');
   ok(order.indexOf('IHDR') === 1, 'and after the header');
+}
+
+{
+  // ---- shapes that real files actually come in ----
+
+  // A messaging app re-encodes and drops everything. Reporting "clean" is the
+  // right answer, but only if the file was genuinely READ -- a walker that gave
+  // up early would report exactly the same thing, so the evidence is what is
+  // asserted: full coverage of the file, and no warnings.
+  const stripped = buildStrippedJpeg();
+  const strippedWalk = walkContainer(stripped);
+  const strippedReport = readMetadata(stripped);
+  eq(strippedReport.container, 'jpeg', 'a re-encoded file is still recognised');
+  eq(strippedReport.blocks.length, 0, 'and correctly reports no metadata');
+  eq(strippedReport.metadataBytes, 0, 'weighing nothing');
+  deep(
+    strippedWalk.segments.map((seg) => seg.where),
+    ['SOI', 'APP0', 'DQT', 'DHT', 'SOF0', 'SOS', 'scan', 'EOI'],
+    'having actually parsed every segment rather than giving up',
+  );
+  eq(strippedWalk.segments[strippedWalk.segments.length - 1].end, stripped.length,
+    'and accounted for every byte');
+  eq(strippedWalk.warnings.length, 0, 'with nothing it could not understand');
+  ok(/already clean/.test(describeExif(strippedReport)), 'so it is described as clean');
+  const strippedOut = stripMetadata(stripped);
+  ok(
+    strippedOut.ok && sameBytes(strippedOut.bytes, stripped),
+    'and stripping it is a no-op, byte for byte',
+  );
+
+  // Progressive JPEGs hold several scans. Finding only the first would truncate
+  // the image on rebuild.
+  const progressive = buildProgressiveJpeg();
+  const progressiveWalk = walkContainer(progressive);
+  eq(
+    progressiveWalk.segments.filter((seg) => seg.where === 'scan').length,
+    3,
+    'every scan of a progressive JPEG is found',
+  );
+  eq(
+    progressiveWalk.segments.filter((seg) => seg.where === 'SOS').length,
+    3,
+    'along with each scan header',
+  );
+  ok(
+    progressiveWalk.segments.some((seg) => seg.where === 'SOF2'),
+    'and the frame is recognised as progressive',
+  );
+  let progressiveTiled = progressiveWalk.segments[0].start === 0;
+  for (let i = 1; i < progressiveWalk.segments.length; i++) {
+    if (progressiveWalk.segments[i].start !== progressiveWalk.segments[i - 1].end) {
+      progressiveTiled = false;
+    }
+  }
+  ok(progressiveTiled, 'a progressive file still tiles exactly');
+  const progressiveReport = readMetadata(progressive);
+  ok(progressiveReport.coordinates !== null, 'its Exif is read');
+  const progressiveOut = stripMetadata(progressive);
+  ok(progressiveOut.ok, 'it can be stripped');
+  ok(
+    sameBytes(imageDataOf(progressive), imageDataOf(progressiveOut.bytes)),
+    'with every scan byte-identical afterwards',
+  );
+  eq(readMetadata(progressiveOut.bytes).coordinates, null, 'and the location gone');
+  eq(readMetadata(progressiveOut.bytes).orientation, 6, 'but the rotation kept');
+
+  // Two APP signatures carry no terminating NUL. Matching them by equality
+  // against a NUL-delimited read silently fails, and for APP14 that means
+  // discarding the colour transform, which renders CMYK and YCCK inverted.
+  const late = buildLateExifJpeg();
+  const lateReport = readMetadata(late);
+  ok(lateReport.coordinates !== null, 'Exif is found even when other APP segments precede it');
+  eq(lateReport.orientation, 8, 'and its orientation read');
+  ok(
+    !lateReport.blocks.some((block) => block.where === 'APP14'),
+    'the Adobe APP14 marker is not counted as metadata',
+  );
+  const lateOut = stripMetadata(late);
+  const lateAfter = walkContainer(lateOut.bytes).segments.map((seg) => seg.where);
+  ok(
+    lateAfter.includes('APP14'),
+    'and survives a strip, because dropping it inverts CMYK and YCCK images',
+  );
+  ok(!lateAfter.includes('APP12'), "while APP12 'Ducky', which holds camera settings, is removed");
+  eq(readMetadata(lateOut.bytes).orientation, 8, 'the rotation still survives');
+  eq(
+    readMetadata(lateOut.bytes).fields.filter((f) => f.label !== 'Orientation').length,
+    0,
+    'and nothing identifying does',
+  );
 }
 
 {

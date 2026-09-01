@@ -135,11 +135,20 @@ const markerName = (marker: number): string => {
   return MARKER_NAMES[marker] ?? `FF${marker.toString(16).toUpperCase()}`;
 };
 
-/** The NUL-terminated identifier an APPn segment opens with. */
+/**
+ * The leading bytes of an APPn segment, as text, WITHOUT stopping at a NUL.
+ *
+ * Most identifiers are NUL-terminated, but two are not: Adobe's APP14 marker is
+ * the bare five bytes 'Adobe' followed straight away by a version number, and
+ * APP12's 'Ducky' is the same. Reading up to the first NUL therefore returns
+ * 'Adobe' plus whatever byte follows, so an equality test against 'Adobe' never
+ * matches a real file — and APP14 declares the colour transform, so losing it
+ * renders CMYK and YCCK JPEGs inverted. Prefix matching avoids the whole
+ * question of who terminates what.
+ */
 function appIdentifier(bytes: Uint8Array, from: number, to: number): string {
   let text = '';
   for (let i = from; i < to && i < from + 40; i++) {
-    if (bytes[i] === 0) break;
     text += String.fromCharCode(bytes[i]);
   }
   return text;
@@ -160,7 +169,8 @@ function classifyApp(
   if (marker === 0xfe) return { kind: 'comment', payloadStart: dataStart };
 
   const id = appIdentifier(bytes, dataStart, dataEnd);
-  const past = dataStart + id.length + 1;
+  // Where the payload begins for a signature that IS NUL-terminated.
+  const past = (signature: string) => dataStart + signature.length + 1;
 
   switch (marker) {
     case 0xe0:
@@ -168,23 +178,33 @@ function classifyApp(
       // removing them changes how the image is interpreted.
       return { kind: 'structural', payloadStart: dataStart };
     case 0xe1:
-      if (id === 'Exif') return { kind: 'exif', payloadStart: dataStart + 6 };
-      if (id.startsWith('http://ns.adobe.com/xap/1.0/')) return { kind: 'xmp', payloadStart: past };
-      if (id.startsWith('http://ns.adobe.com/xmp/extension/')) return { kind: 'xmp', payloadStart: past };
+      // 'Exif' is followed by two NULs, so the TIFF header starts six bytes in.
+      if (id.startsWith('Exif\0')) return { kind: 'exif', payloadStart: dataStart + 6 };
+      if (id.startsWith('http://ns.adobe.com/xap/1.0/')) {
+        return { kind: 'xmp', payloadStart: past('http://ns.adobe.com/xap/1.0/') };
+      }
+      if (id.startsWith('http://ns.adobe.com/xmp/extension/')) {
+        return { kind: 'xmp', payloadStart: past('http://ns.adobe.com/xmp/extension/') };
+      }
       return { kind: 'vendor', payloadStart: dataStart };
     case 0xe2:
-      if (id === 'ICC_PROFILE') return { kind: 'icc', payloadStart: past + 2 };
+      // Past the signature there is a chunk number and a chunk count.
+      if (id.startsWith('ICC_PROFILE\0')) {
+        return { kind: 'icc', payloadStart: past('ICC_PROFILE') + 2 };
+      }
       // Multi-Picture Format indexes further whole images appended to the file
       // — depth maps and the stills behind a phone's motion photos.
-      if (id === 'MPF') return { kind: 'mpf', payloadStart: past };
+      if (id.startsWith('MPF\0')) return { kind: 'mpf', payloadStart: past('MPF') };
       return { kind: 'vendor', payloadStart: dataStart };
     case 0xed:
-      if (id.startsWith('Photoshop')) return { kind: 'iptc', payloadStart: past };
+      if (id.startsWith('Photoshop')) return { kind: 'iptc', payloadStart: dataStart };
       return { kind: 'vendor', payloadStart: dataStart };
     case 0xee:
-      // The Adobe APP14 marker declares the colour transform. Dropping it makes
-      // CMYK and YCCK JPEGs render inverted, so it stays.
-      if (id === 'Adobe') return { kind: 'structural', payloadStart: dataStart };
+      // APP14 declares the colour transform for CMYK and YCCK JPEGs. It holds a
+      // version, two flag words and a transform byte — nothing identifying —
+      // and dropping it inverts those images, so it stays. Note there is no NUL
+      // after the signature, which is why this is a prefix test.
+      if (id.startsWith('Adobe')) return { kind: 'structural', payloadStart: dataStart };
       return { kind: 'vendor', payloadStart: dataStart };
     default:
       return { kind: 'vendor', payloadStart: dataStart };
