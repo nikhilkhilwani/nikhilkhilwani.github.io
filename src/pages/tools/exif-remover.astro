@@ -106,6 +106,8 @@ const SWITCHES = [
       <p class="ex__note" id="ex-note" aria-live="polite"></p>
     </section>
 
+    <section class="ex__done" id="ex-done" aria-live="polite"></section>
+
     <details class="panel ex__caveats">
       <summary>What this tool does not do</summary>
       <ul>
@@ -155,6 +157,10 @@ const SWITCHES = [
 
   .ex__out { display: grid; gap: 1rem; }
   .ex__out:empty { display: none; }
+
+  /* The outcome sits with the button that produced it, not back up inside the
+     report it acted on. */
+  .ex__done:empty { display: none; }
 
   .ex__caveats summary {
     cursor: pointer;
@@ -302,13 +308,47 @@ const SWITCHES = [
   .ex__thumb p { margin: 0; font-size: 0.8rem; color: var(--ink-dim); }
   .ex__thumb strong { font-size: 0.85rem; color: var(--ink); }
 
+  .ex__done {
+    display: grid;
+    gap: 0.6rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--surface);
+    padding: 0.9rem;
+  }
+  /* Text in one column, the action in the other, so the button sits beside what
+     it acts on rather than wrapping onto a line of its own. */
   .ex__result {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.5rem 0.9rem;
+  }
+  .ex__result + .ex__result {
+    padding-top: 0.6rem;
+    border-top: 1px solid var(--line);
+  }
+  .ex__resulttext {
     display: flex;
     flex-wrap: wrap;
-    align-items: center;
-    gap: 0.5rem 0.75rem;
-    padding-top: 0.75rem;
+    align-items: baseline;
+    gap: 0.2rem 0.6rem;
+    min-width: 0;
+  }
+  @media (max-width: 560px) {
+    .ex__result { grid-template-columns: minmax(0, 1fr); }
+    .ex__result .btn { justify-self: start; }
+  }
+  .ex__doneall {
+    padding-top: 0.6rem;
     border-top: 1px solid var(--line);
+    display: flex;
+  }
+  .ex__file {
+    font-weight: 500;
+    font-size: 0.88rem;
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
   .ex__saved { font-size: 0.85rem; color: var(--ink-dim); }
   .ex__saved b { color: var(--ink); font-weight: 500; }
@@ -335,6 +375,7 @@ const SWITCHES = [
 
   const controls = $<HTMLElement>('ex-controls');
   const out = $<HTMLElement>('ex-out');
+  const done = $<HTMLElement>('ex-done');
   const note = $<HTMLElement>('ex-note');
   const cleanBtn = $<HTMLButtonElement>('ex-clean');
   const clearBtn = $<HTMLButtonElement>('ex-clear');
@@ -626,58 +667,73 @@ const SWITCHES = [
       body.append(el('p', 'ex__warn', warning));
     }
 
-    if (entry.cleaned) {
-      const result = el('div', 'ex__result');
-      const after = report.fileBytes - entry.cleaned.removed;
+    node.append(body);
+    return node;
+  }
+
+  /** One row per cleaned file: what came off, and the file to take away. */
+  function renderDone(): void {
+    done.replaceChildren();
+    const cleaned = entries.filter((entry) => entry.cleaned);
+    if (!cleaned.length) return;
+
+    const fragment = document.createDocumentFragment();
+    for (const entry of cleaned) {
+      const row = el('div', 'ex__result');
+      const text = el('div', 'ex__resulttext');
+      // With one file the card above already names it; with several, the row
+      // has to say which download is which.
+      if (entries.length > 1) text.append(el('span', 'ex__file', entry.name));
+
+      const after = entry.report.fileBytes - entry.cleaned!.removed;
       const saved = el('span', 'ex__saved');
       saved.append(document.createTextNode('Cleaned — '));
-      const strong = el('b', undefined, formatBytes(entry.cleaned.removed));
-      saved.append(strong);
+      saved.append(el('b', undefined, formatBytes(entry.cleaned!.removed)));
       saved.append(
         document.createTextNode(
-          ` removed, ${formatBytes(after)} left (${savingsPercent(report.fileBytes, after)}% smaller). The image itself is untouched.`,
+          ` removed, ${formatBytes(after)} left (${savingsPercent(entry.report.fileBytes, after)}% smaller). The image itself is untouched.`,
         ),
       );
-      result.append(saved);
+      text.append(saved);
+      row.append(text);
 
       const button = el('button', 'btn btn--primary') as HTMLButtonElement;
       button.type = 'button';
       button.textContent = 'Download';
       button.addEventListener('click', () => download(entry));
-      result.append(button);
-      body.append(result);
+      row.append(button);
+      fragment.append(row);
 
-      for (const warning of entry.cleaned.warnings) {
-        body.append(el('p', 'ex__warn', warning));
+      for (const warning of entry.cleaned!.warnings) {
+        fragment.append(el('p', 'ex__warn', warning));
       }
     }
 
-    node.append(body);
-    return node;
+    if (cleaned.length > 1) {
+      const all = el('div', 'ex__doneall');
+      const button = el('button', 'btn btn--primary') as HTMLButtonElement;
+      button.type = 'button';
+      button.textContent = `Download all ${cleaned.length} as a zip`;
+      button.addEventListener('click', () => void downloadAll());
+      all.append(button);
+      fragment.append(all);
+    }
+
+    done.append(fragment);
   }
 
   function render(): void {
     out.replaceChildren();
     if (!entries.length) {
       controls.hidden = true;
+      renderDone();
       return;
     }
 
     const fragment = document.createDocumentFragment();
     for (const entry of entries) fragment.append(card(entry));
-
-    const done = entries.filter((entry) => entry.cleaned);
-    if (done.length > 1) {
-      const all = el('div', 'ex__result');
-      const button = el('button', 'btn btn--primary') as HTMLButtonElement;
-      button.type = 'button';
-      button.textContent = `Download all ${done.length} as a zip`;
-      button.addEventListener('click', () => void downloadAll());
-      all.append(button);
-      fragment.append(all);
-    }
-
     out.append(fragment);
+    renderDone();
   }
 
   /* ----------------------------------------------------------------- wiring */
