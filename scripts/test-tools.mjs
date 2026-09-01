@@ -15,6 +15,19 @@ import {
   normalizeUrlish, escapeMicroformat,
 } from '../src/lib/qr/qr.ts';
 import { fitWithin } from '../src/lib/img/raster.ts';
+import { unzlibSync } from 'fflate';
+import {
+  detectContainer, walkContainer, categoryOf, crc32,
+} from '../src/lib/exif/containers.ts';
+import {
+  readTiff, formatValue, coordinatesFrom, orientationFrom, tagInfo, dmsToDegrees,
+} from '../src/lib/exif/tags.ts';
+// describeReport is also exported by pdf/compress.ts; alias to keep both.
+import { readMetadata, summarise, describeReport as describeExif } from '../src/lib/exif/read.ts';
+import { stripMetadata, imageDataOf, minimalOrientationTiff } from '../src/lib/exif/strip.ts';
+import {
+  buildJpeg, buildPng, buildWebp, richExif, buildTiff, TYPE,
+} from './exif-fixtures.mjs';
 import { parseColor, hexToRgb, rgbToHex } from '../src/lib/color/convert.ts';
 import { contrastRatio, relativeLuminance } from '../src/lib/contrast/wcag.ts';
 import { passwordStrength, describePermissions, OPEN_PERMISSIONS } from '../src/lib/pdf/protect.ts';
@@ -2768,6 +2781,502 @@ eq(
   ok(/@@ -1 \+0(?:,0)? @@/.test(removed), `an empty right side is anchored at 0 (${removed.split('\n')[2]})`);
 
   eq(countHunks(''), 0, 'an empty patch has no hunks');
+}
+
+/* ------------------------------------------------------------------- exif */
+
+/** Byte-for-byte equality, the only thing that proves a strip was lossless. */
+const sameBytes = (a, b) => {
+  if (!a || !b || a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
+  return true;
+};
+
+{
+  // ---- detection ----
+  eq(detectContainer(buildJpeg()), 'jpeg', 'a JPEG is recognised');
+  eq(detectContainer(buildPng()), 'png', 'a PNG is recognised');
+  eq(detectContainer(buildWebp()), 'webp', 'a WebP is recognised');
+  eq(detectContainer(Uint8Array.from([0x47, 0x49, 0x46, 0x38, 0x39, 0x61])), 'gif', 'a GIF is recognised');
+  eq(detectContainer(minimalOrientationTiff(1)), 'tiff', 'a bare Exif block is TIFF');
+  eq(detectContainer(Uint8Array.from([1, 2, 3, 4, 5])), null, 'nonsense is not a container');
+  eq(detectContainer(new Uint8Array(0)), null, 'nothing is not a container');
+
+  // ISOBMFF brands. The brand, not the extension, decides.
+  const isobmff = (brand) => {
+    const out = new Uint8Array(16);
+    out.set([0, 0, 0, 0x10], 0);
+    out.set([...'ftyp'].map((c) => c.charCodeAt(0)), 4);
+    out.set([...brand].map((c) => c.charCodeAt(0)), 8);
+    return out;
+  };
+  eq(detectContainer(isobmff('heic')), 'heic', 'a HEIC brand is recognised');
+  eq(detectContainer(isobmff('mif1')), 'heic', 'so is the mif1 brand HEIF uses');
+  eq(detectContainer(isobmff('avif')), 'avif', 'an AVIF brand is recognised');
+
+  // ---- the structural invariant everything else depends on ----
+  for (const [name, file] of [
+    ['jpeg', buildJpeg()],
+    ['png', buildPng()],
+    ['webp', buildWebp()],
+  ]) {
+    const walk = walkContainer(file);
+    let contiguous = walk.segments.length > 0 && walk.segments[0].start === 0;
+    for (let i = 1; i < walk.segments.length; i++) {
+      if (walk.segments[i].start !== walk.segments[i - 1].end) contiguous = false;
+    }
+    ok(contiguous, `${name}: segments tile the file with no gap or overlap`);
+    eq(walk.segments[walk.segments.length - 1].end, file.length, `${name}: segments reach the last byte`);
+    ok(walk.rewritable, `${name}: is rewritable`);
+    // Payload bounds must sit inside their own segment, or a reader walks off it.
+    ok(
+      walk.segments.every((seg) => seg.payloadStart >= seg.start && seg.payloadEnd <= seg.end),
+      `${name}: every payload lies within its segment`,
+    );
+  }
+
+  // HEIC is named and refused rather than half-handled.
+  const heic = walkContainer(isobmff('heic'));
+  eq(heic.container, 'heic', 'HEIC walks to a named container');
+  eq(heic.rewritable, false, 'but is not rewritable');
+  const heicStrip = stripMetadata(isobmff('heic'));
+  eq(heicStrip.ok, false, 'so stripping it declines');
+  ok(!heicStrip.ok && /read but not yet rewrite/.test(heicStrip.reason), 'and says why');
+
+  // ---- category mapping ----
+  eq(categoryOf('structural'), null, 'structural blocks belong to no removal category');
+  eq(categoryOf('exif'), 'exif', 'exif maps to its own switch');
+  eq(categoryOf('timestamp'), 'comments', 'a timestamp is removed with comments');
+  eq(categoryOf('trailer'), 'other', 'appended data is removed with other metadata');
+  eq(categoryOf('icc'), 'icc', 'the colour profile has its own switch');
+}
+
+{
+  // ---- TIFF reading ----
+  const tiff = richExif();
+  const read = readTiff(tiff, 0);
+  ok(read, 'a built Exif block reads back');
+  eq(read.bigEndian, true, 'the byte order is honoured');
+  ok(read.entries.length >= 20, `all IFDs are visited (${read.entries.length} entries)`);
+  ok(read.entries.some((e) => e.ifd === 'gps'), 'the GPS IFD is followed');
+  ok(read.entries.some((e) => e.ifd === 'exif'), 'the Exif IFD is followed');
+  ok(read.entries.some((e) => e.ifd === 'ifd1'), 'IFD1 is followed');
+  ok(read.thumbnail && read.thumbnail.length === 9, 'the thumbnail is located');
+
+  // Little-endian must work identically — half of all cameras write 'II'.
+  const little = readTiff(buildTiff({
+    bigEndian: false,
+    ifd0: [{ tag: 0x0110, type: TYPE.ASCII, values: 'Little Endian Cam' }],
+  }), 0);
+  ok(little && !little.bigEndian, 'a little-endian block is recognised');
+  eq(
+    formatValue(little.entries.find((e) => e.tag === 0x0110)),
+    'Little Endian Cam',
+    'and reads the same values',
+  );
+
+  // Values of four bytes or fewer are inline; longer ones live at an offset.
+  const boundary = readTiff(buildTiff({
+    ifd0: [
+      { tag: 0x0110, type: TYPE.ASCII, values: 'abc' },   // 4 bytes with NUL: inline
+      { tag: 0x010f, type: TYPE.ASCII, values: 'abcd' },  // 5 bytes: offset
+    ],
+  }), 0);
+  eq(formatValue(boundary.entries.find((e) => e.tag === 0x0110)), 'abc', 'a 4-byte value reads inline');
+  eq(formatValue(boundary.entries.find((e) => e.tag === 0x010f)), 'abcd', 'a 5-byte value reads from its offset');
+
+  eq(readTiff(Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8]), 0), null, 'a bad byte-order mark is refused');
+  eq(readTiff(new Uint8Array(4), 0), null, 'a truncated header is refused');
+  eq(readTiff(richExif(), 9999), null, 'a start beyond the file is refused');
+}
+
+{
+  // ---- formatting ----
+  const entries = readTiff(richExif(), 0).entries;
+  const value = (ifd, tag) => formatValue(entries.find((e) => e.ifd === ifd && e.tag === tag));
+
+  eq(value('exif', 0x829a), '1/125 s', 'a fast exposure reads as a fraction');
+  eq(value('exif', 0x829d), 'f/1.8', 'the f-number carries its notation');
+  eq(value('exif', 0x920a), '5.2 mm', 'the focal length carries its unit');
+  eq(value('ifd0', 0x0112), 'Rotated 90° CW', 'orientation reads as words, not a code');
+  eq(value('exif', 0x9286), 'holiday', 'the user comment drops its 8-byte character-code prefix');
+  eq(value('exif', 0x927c), '64 bytes of vendor data', 'the maker note is summarised, not dumped');
+  eq(value('gps', 0x0002), '18.92°', 'latitude collapses degrees, minutes and seconds');
+
+  // A slow exposure is not a fraction.
+  const slow = readTiff(buildTiff({ exif: [{ tag: 0x829a, type: TYPE.RATIONAL, values: [4, 1] }] }), 0);
+  eq(formatValue(slow.entries.find((e) => e.tag === 0x829a)), '4 s', 'a slow exposure reads in seconds');
+
+  // Windows writes its own fields as UTF-16LE inside a byte array.
+  const xp = buildTiff({
+    ifd0: [{
+      tag: 0x9c9d,
+      type: TYPE.BYTE,
+      values: Uint8Array.from([0x4e, 0x00, 0x69, 0x00, 0x6b, 0x00, 0x00, 0x00]),
+    }],
+  });
+  eq(
+    formatValue(readTiff(xp, 0).entries.find((e) => e.tag === 0x9c9d)),
+    'Nik',
+    'a Windows author field decodes from UTF-16',
+  );
+
+  eq(dmsToDegrees([[10, 1], [30, 1], [0, 1]]), 10.5, 'thirty minutes is half a degree');
+  eq(dmsToDegrees([[0, 0]]), 0, 'a zero denominator does not become Infinity');
+
+  eq(tagInfo('gps', 0x0002).group, 'location', 'latitude is classed as location');
+  eq(tagInfo('ifd0', 0x0112).sensitive, false, 'orientation is not sensitive');
+  eq(tagInfo('exif', 0xa431).sensitive, true, 'a body serial number is');
+  eq(tagInfo('ifd0', 0x0103).sensitive, false, 'a standard structure tag is not');
+  eq(tagInfo('ifd0', 0x4242), null, 'an unknown tag has no entry');
+}
+
+{
+  // ---- coordinates, including the hemisphere signs ----
+  const south = buildTiff({
+    gps: [
+      { tag: 0x0001, type: TYPE.ASCII, values: 'S' },
+      { tag: 0x0002, type: TYPE.RATIONAL, values: [33, 1, 51, 1, 0, 1] },
+      { tag: 0x0003, type: TYPE.ASCII, values: 'W' },
+      { tag: 0x0004, type: TYPE.RATIONAL, values: [70, 1, 40, 1, 0, 1] },
+    ],
+  });
+  const coords = coordinatesFrom(readTiff(south, 0).entries);
+  near(coords.latitude, -33.85, 0.001, 'a southern latitude is negative');
+  near(coords.longitude, -70.6667, 0.001, 'a western longitude is negative');
+  ok(/S/.test(coords.dms) && /W/.test(coords.dms), `the DMS form names the hemispheres (${coords.dms})`);
+
+  const north = coordinatesFrom(readTiff(richExif(), 0).entries);
+  near(north.latitude, 18.92, 0.0001, 'a northern latitude stays positive');
+  near(north.longitude, 72.825, 0.0001, 'an eastern longitude stays positive');
+
+  // An out-of-range position is a parse failure, not a place on Earth.
+  const absurd = buildTiff({
+    gps: [
+      { tag: 0x0001, type: TYPE.ASCII, values: 'N' },
+      { tag: 0x0002, type: TYPE.RATIONAL, values: [500, 1] },
+      { tag: 0x0003, type: TYPE.ASCII, values: 'E' },
+      { tag: 0x0004, type: TYPE.RATIONAL, values: [10, 1] },
+    ],
+  });
+  eq(coordinatesFrom(readTiff(absurd, 0).entries), null, 'an impossible latitude is rejected');
+
+  eq(coordinatesFrom([]), null, 'no GPS IFD means no coordinates');
+  eq(orientationFrom([]), null, 'no orientation tag means no orientation');
+  const bad = buildTiff({ ifd0: [{ tag: 0x0112, type: TYPE.SHORT, values: [99] }] });
+  eq(orientationFrom(readTiff(bad, 0).entries), null, 'an orientation outside 1-8 is refused');
+}
+
+{
+  // ---- the report ----
+  const report = readMetadata(buildJpeg(), unzlibSync);
+  eq(report.container, 'jpeg', 'the report names the container');
+  ok(report.coordinates !== null, 'the location is surfaced');
+  ok(report.thumbnail !== null, 'the embedded preview is surfaced');
+  eq(report.orientation, 6, 'the orientation is surfaced');
+  ok(report.metadataBytes > 1000, `the metadata weight is measured (${report.metadataBytes} bytes)`);
+  ok(report.metadataBytes < report.fileBytes, 'and is less than the whole file');
+
+  const found = (label) => report.fields.some((f) => f.label === label);
+  ok(found('Camera model'), 'the camera model is listed');
+  ok(found('Body serial number'), 'the serial number is listed');
+  ok(found('Artist'), 'the artist is listed');
+  ok(found('Comment'), 'the JPEG comment is listed');
+  ok(found('IPTC record'), 'the IPTC block is reported even though it is not parsed');
+  ok(report.fields.some((f) => f.source === 'XMP' && f.value === 'Mumbai'), 'XMP yields the city');
+  ok(report.fields.some((f) => f.source === 'XMP' && f.value === 'Nikhil Khilwani'), 'and the creator');
+
+  const s = summarise(report);
+  ok(s.sensitive > 15, `most fields are flagged sensitive (${s.sensitive}/${s.total})`);
+  ok(s.hasLocation && s.hasThumbnail, 'the summary flags the location and the preview');
+  ok(s.groups.includes('location') && s.groups.includes('device'), 'and names the groups');
+
+  ok(/where it was taken/.test(describeExif(report)), `the summary line leads with place (${describeExif(report)})`);
+
+  // PNG's three text flavours, including the deflated one.
+  const png = readMetadata(buildPng(), unzlibSync);
+  ok(png.fields.some((f) => f.label === 'Software' && f.value === 'GIMP 3.0'), 'a tEXt chunk is read');
+  ok(png.fields.some((f) => f.label === 'Comment' && f.value === 'taken at home'), 'a deflated zTXt chunk is read');
+  ok(png.fields.some((f) => f.source === 'XMP'), 'XMP inside an iTXt chunk is read');
+  ok(png.fields.some((f) => f.label === 'Last modified' && /2026-03-14/.test(f.value)), 'the tIME chunk is read');
+
+  // Without an inflate function the tool still reports the block honestly.
+  const noInflate = readMetadata(buildPng());
+  ok(
+    noInflate.fields.some((f) => f.label === 'Comment' && /compressed/.test(f.value)),
+    'a compressed chunk is reported as present when zlib is unavailable',
+  );
+
+  const clean = readMetadata(buildJpeg({
+    exif: null, xmp: null, iptc: false, icc: false, comment: null, trailer: false,
+  }));
+  eq(clean.blocks.length, 0, 'a file with no metadata reports no blocks');
+  ok(/already clean/.test(describeExif(clean)), 'and is described as clean');
+  eq(readMetadata(new Uint8Array(0)).container, null, 'an empty file reports nothing');
+}
+
+{
+  // ---- stripping ----
+  for (const [name, file] of [
+    ['jpeg', buildJpeg()],
+    ['png', buildPng()],
+    ['webp', buildWebp()],
+  ]) {
+    const before = readMetadata(file, unzlibSync);
+    const outcome = stripMetadata(file);
+    ok(outcome.ok, `${name}: strip succeeds`);
+    if (!outcome.ok) continue;
+
+    const after = readMetadata(outcome.bytes, unzlibSync);
+    const leftover = after.fields.filter((f) => f.label !== 'Orientation');
+    eq(leftover.length, 0, `${name}: no identifying field survives`);
+    eq(after.coordinates, null, `${name}: the location is gone`);
+    eq(after.thumbnail, null, `${name}: the embedded preview is gone`);
+    ok(outcome.bytes.length < file.length, `${name}: the file shrinks`);
+
+    // The claim the whole approach rests on.
+    ok(
+      sameBytes(imageDataOf(file), imageDataOf(outcome.bytes)),
+      `${name}: the pixel-bearing bytes are byte-identical`,
+    );
+
+    // Orientation is the one field allowed to come back.
+    eq(after.orientation, before.orientation, `${name}: orientation ${before.orientation} is preserved`);
+    eq(outcome.orientationPreserved, before.orientation, `${name}: and the result reports it`);
+
+    const twice = stripMetadata(outcome.bytes);
+    ok(twice.ok && sameBytes(twice.bytes, outcome.bytes), `${name}: stripping is idempotent`);
+  }
+
+  // ---- the orientation decision ----
+  const sideways = buildJpeg({ exif: richExif({ orientation: 6 }), trailer: false });
+  const kept = stripMetadata(sideways);
+  eq(readMetadata(kept.bytes).orientation, 6, 'a rotated photo keeps its rotation by default');
+  eq(readMetadata(kept.bytes).fields.length, 1, 'and gains nothing else');
+
+  const dropped = stripMetadata(sideways, { keepOrientation: false });
+  eq(readMetadata(dropped.bytes).orientation, null, 'until asked to drop it');
+  ok(dropped.bytes.length < kept.bytes.length, 'which saves the last few bytes');
+
+  // An already-upright photo needs nothing written back.
+  const upright = buildJpeg({ exif: richExif({ orientation: 1 }), trailer: false });
+  const uprightOut = stripMetadata(upright);
+  eq(uprightOut.orientationPreserved, null, 'an upright photo needs no orientation block');
+  // The colour profile is deliberately kept, so "clean" means no metadata
+  // block other than that one.
+  deep(
+    readMetadata(uprightOut.bytes).blocks.map((b) => b.category),
+    ['icc'],
+    'and ends carrying nothing but the colour profile',
+  );
+  eq(readMetadata(uprightOut.bytes).fields.length, 0, 'with no readable field left at all');
+
+  eq(minimalOrientationTiff(6).length, 26, 'the synthesised block is 26 bytes');
+  eq(
+    orientationFrom(readTiff(minimalOrientationTiff(3), 0).entries),
+    3,
+    'and reads back as the orientation it was given',
+  );
+  eq(
+    readTiff(minimalOrientationTiff(3), 0).entries.length,
+    1,
+    'carrying exactly one tag and nothing else',
+  );
+
+  // ---- per-category switches ----
+  const jpeg = buildJpeg();
+  const nothing = stripMetadata(jpeg, {
+    exif: false, xmp: false, iptc: false, comments: false, other: false,
+  });
+  ok(nothing.ok && sameBytes(nothing.bytes, jpeg), 'removing nothing returns the file unchanged');
+
+  const iccGone = stripMetadata(jpeg, { icc: true });
+  ok(
+    iccGone.ok && !walkContainer(iccGone.bytes).segments.some((seg) => seg.kind === 'icc'),
+    'the colour profile goes only when asked',
+  );
+  ok(
+    walkContainer(stripMetadata(jpeg).bytes).segments.some((seg) => seg.kind === 'icc'),
+    'and is kept by default, because removing it changes how the image renders',
+  );
+
+  const xmpOnly = stripMetadata(jpeg, { exif: false, iptc: false, comments: false, other: false });
+  const xmpReport = readMetadata(xmpOnly.bytes);
+  ok(xmpReport.coordinates !== null, 'removing only XMP leaves the Exif alone');
+  ok(!xmpReport.fields.some((f) => f.source === 'XMP'), 'and takes the XMP');
+
+  // Appended images are metadata by any measure.
+  const withTrailer = buildJpeg();
+  ok(
+    walkContainer(withTrailer).segments.some((seg) => seg.kind === 'trailer'),
+    'an appended image after EOI is seen',
+  );
+  ok(
+    !walkContainer(stripMetadata(withTrailer).bytes).segments.some((seg) => seg.kind === 'trailer'),
+    'and removed',
+  );
+  const stripped = stripMetadata(withTrailer).bytes;
+  eq(stripped[stripped.length - 2], 0xff, 'the result ends with EOI');
+  eq(stripped[stripped.length - 1], 0xd9, 'exactly');
+  ok(
+    walkContainer(stripped).segments.some((seg) => seg.where === 'APP0'),
+    'while the JFIF header stays, because it says how to read the pixels',
+  );
+}
+
+{
+  // ---- container-specific rewriting ----
+  const webp = stripMetadata(buildWebp());
+  const view = new DataView(webp.bytes.buffer, webp.bytes.byteOffset);
+  eq(view.getUint32(4, true) + 8, webp.bytes.length, 'a WebP rebuild corrects the RIFF length');
+  const vp8x = walkContainer(webp.bytes).segments.find((seg) => seg.where === 'VP8X');
+  const flags = webp.bytes[vp8x.payloadStart];
+  eq(flags & 0x04, 0, 'and clears the XMP feature bit');
+  ok((flags & 0x08) !== 0, 'while the Exif bit still matches the block written back');
+  ok((flags & 0x20) !== 0, 'and the colour-profile bit is untouched');
+
+  const noExif = stripMetadata(buildWebp({ exif: null }));
+  const noExifVp8x = walkContainer(noExif.bytes).segments.find((seg) => seg.where === 'VP8X');
+  eq(noExif.bytes[noExifVp8x.payloadStart] & 0x08, 0, 'with no orientation to keep, the Exif bit is cleared too');
+
+  // A PNG chunk this tool writes must checksum, or decoders refuse the file.
+  const png = stripMetadata(buildPng());
+  const exifChunk = walkContainer(png.bytes).segments.find((seg) => seg.where === 'eXIf');
+  ok(exifChunk, 'a PNG rebuild writes the orientation back as an eXIf chunk');
+  const stored = new DataView(png.bytes.buffer, png.bytes.byteOffset).getUint32(exifChunk.end - 4);
+  eq(stored, crc32(png.bytes.subarray(exifChunk.start + 4, exifChunk.end - 4)), 'with a correct CRC');
+  const order = walkContainer(png.bytes).segments.map((seg) => seg.where);
+  ok(order.indexOf('eXIf') < order.indexOf('IDAT'), 'placed before the image data, as the spec asks');
+  ok(order.indexOf('IHDR') === 1, 'and after the header');
+}
+
+{
+  // ---- malformed and hostile input ----
+  const jpegExif = buildJpeg({ xmp: null, iptc: false, icc: false, comment: null, trailer: false });
+
+  const outOfBounds = jpegExif.slice();
+  const at = outOfBounds.indexOf(0x45);
+  new DataView(outOfBounds.buffer).setUint32(at + 6 + 4, 0x7ffffff0);
+
+  const looping = jpegExif.slice();
+  {
+    const tiffStart = looping.indexOf(0x45) + 6;
+    const view = new DataView(looping.buffer);
+    const ifd0 = view.getUint32(tiffStart + 4);
+    const count = view.getUint16(tiffStart + ifd0);
+    // Point IFD0's next-IFD link at itself.
+    view.setUint32(tiffStart + ifd0 + 2 + count * 12, ifd0);
+  }
+
+  const absurdCount = jpegExif.slice();
+  {
+    const tiffStart = absurdCount.indexOf(0x45) + 6;
+    const view = new DataView(absurdCount.buffer);
+    view.setUint16(tiffStart + view.getUint32(tiffStart + 4), 0xffff);
+  }
+
+  const cases = [
+    ['an empty file', new Uint8Array(0)],
+    ['pure garbage', Uint8Array.from([1, 2, 3, 4, 5, 6, 7, 8, 9])],
+    ['a JPEG stub', Uint8Array.from([0xff, 0xd8, 0xff])],
+    ['a JPEG cut mid-segment', buildJpeg().subarray(0, 40)],
+    ['a PNG cut mid-chunk', buildPng().subarray(0, 30)],
+    ['a WebP cut mid-chunk', buildWebp().subarray(0, 20)],
+    ['an Exif offset out of bounds', outOfBounds],
+    ['an IFD chain that loops', looping],
+    ['an IFD claiming 65535 entries', absurdCount],
+  ];
+
+  for (const [name, input] of cases) {
+    let threw = null;
+    let report = null;
+    let outcome = null;
+    try {
+      report = readMetadata(input, unzlibSync);
+      outcome = stripMetadata(input);
+    } catch (error) {
+      threw = error;
+    }
+    ok(!threw, `${name}: reading and stripping does not throw${threw ? ` (${threw.message})` : ''}`);
+    if (!report || !outcome) continue;
+
+    // The rule that keeps a "cleaner" from being a shredder: bytes we could not
+    // parse are preserved, never discarded.
+    if (outcome.ok) {
+      ok(
+        sameBytes(imageDataOf(input), imageDataOf(outcome.bytes)),
+        `${name}: the image data survives a rebuild`,
+      );
+    }
+  }
+
+  // Two pointers naming the same IFD must not report its tags twice. Aim the
+  // Exif pointer back at IFD0: without the guard, IFD0's fields reappear
+  // labelled 'Exif', inventing content the file never had.
+  const collided = richExif();
+  {
+    const view = new DataView(collided.buffer, collided.byteOffset);
+    const ifd0 = view.getUint32(4);
+    const count = view.getUint16(ifd0);
+    for (let i = 0; i < count; i++) {
+      const at = ifd0 + 2 + i * 12;
+      if (view.getUint16(at) === 0x8769) view.setUint32(at + 8, ifd0);
+    }
+  }
+  const collidedRead = readTiff(collided, 0);
+  eq(
+    collidedRead.entries.filter((e) => e.ifd === 'exif').length,
+    0,
+    'an Exif pointer aimed back at IFD0 yields no duplicate fields',
+  );
+  ok(
+    collidedRead.entries.some((e) => e.ifd === 'ifd0' && e.tag === 0x0110),
+    'while IFD0 itself still reads normally',
+  );
+
+  // A loop must terminate rather than reading the same IFD forever.
+  const loopRead = readTiff(looping, looping.indexOf(0x45) + 6);
+  ok(loopRead && loopRead.entries.length > 0, 'a looping IFD chain still yields its first pass');
+  // The iteration cap alone would bound this, so the real guarantee is that no
+  // IFD is visited twice: every (ifd, tag) pair must be unique.
+  const visited = loopRead.entries.map((e) => `${e.ifd}:${e.tag}`);
+  eq(
+    new Set(visited).size,
+    visited.length,
+    `and reads no IFD twice (${visited.length} entries, ${new Set(visited).size} distinct)`,
+  );
+
+  // A bogus entry count is refused with a warning, not followed.
+  const absurdRead = readTiff(absurdCount, absurdCount.indexOf(0x45) + 6);
+  ok(
+    absurdRead && absurdRead.warnings.some((w) => /more entries than/.test(w)),
+    'an impossible entry count is reported',
+  );
+
+  eq(stripMetadata(Uint8Array.from([1, 2, 3])).ok, false, 'an unrecognised file cannot be stripped');
+
+  // A thumbnail pointer out of bounds must be refused where it is READ, not
+  // only where it is later sliced -- two guards, and each needs its own test.
+  const badThumb = richExif();
+  {
+    const view = new DataView(badThumb.buffer, badThumb.byteOffset);
+    const ifd0 = view.getUint32(4);
+    // IFD1 is named by the next-IFD link that closes IFD0.
+    const ifd1 = view.getUint32(ifd0 + 2 + view.getUint16(ifd0) * 12);
+    // Walk IFD1 for the ThumbnailOffset entry and point it past the end.
+    const count = view.getUint16(ifd1);
+    for (let i = 0; i < count; i++) {
+      const at = ifd1 + 2 + i * 12;
+      if (view.getUint16(at) === 0x0201) view.setUint32(at + 8, 0x7ffffff0);
+    }
+  }
+  const thumbRead = readTiff(badThumb, 0);
+  eq(thumbRead.thumbnail, null, 'a thumbnail pointing outside the file is refused');
+  ok(
+    thumbRead.warnings.some((w) => /thumbnail/.test(w)),
+    'and the reason is reported rather than swallowed',
+  );
+  eq(readMetadata(badThumb).thumbnail, null, 'so the report shows no preview');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

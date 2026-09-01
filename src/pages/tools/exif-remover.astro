@@ -1,0 +1,719 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+import { READ_CAVEATS } from '../../lib/exif/read.ts';
+
+/**
+ * What each switch removes. Order matters: the first four are the ones a person
+ * came here for, `other` is the catch-all, and the colour profile is last
+ * because it is the one thing here that is NOT about privacy.
+ */
+const SWITCHES = [
+  {
+    id: 'exif',
+    label: 'Camera & location (Exif)',
+    hint: 'GPS, device, lens, serial numbers, timestamps, embedded preview',
+    checked: true,
+  },
+  {
+    id: 'xmp',
+    label: 'Editing history (XMP)',
+    hint: 'Which software touched it, and who it credits',
+    checked: true,
+  },
+  {
+    id: 'iptc',
+    label: 'Captions & credits (IPTC)',
+    hint: 'Photographer, caption, city, country',
+    checked: true,
+  },
+  {
+    id: 'comments',
+    label: 'Comments & timestamps',
+    hint: 'Free text and last-modified dates written by editors',
+    checked: true,
+  },
+  {
+    id: 'other',
+    label: 'Everything else',
+    hint: 'Vendor blocks, and extra images appended after the visible one',
+    checked: true,
+  },
+  {
+    id: 'icc',
+    label: 'Colour profile (ICC)',
+    hint: 'Not identifying. Removing it can shift how colours look.',
+    checked: false,
+  },
+];
+---
+
+<ToolLayout slug="exif-remover">
+  <div class="ex">
+    <Dropzone
+      id="ex-file"
+      accept="image/jpeg,image/png,image/webp,image/heic,image/heif,image/avif,image/tiff,.jpg,.jpeg,.png,.webp,.heic,.heif,.avif,.tif,.tiff"
+      multiple
+      icon="tag"
+      label="Choose photos, or drop them anywhere"
+      hint="JPEG, PNG and WebP can be inspected and cleaned. HEIC, AVIF and TIFF are identified but not yet cleaned. You can paste too."
+    />
+
+    <p class="ex__promise">
+      <Icon name="lock" size={15} />
+      <span>Nothing is uploaded. The files never leave this tab.</span>
+    </p>
+
+    <section class="panel ex__controls" id="ex-controls" hidden>
+      <p class="eyebrow">Remove</p>
+      <div class="ex__switches">
+        {
+          SWITCHES.map((item) => (
+            <label class="ex__switch">
+              <input type="checkbox" id={`ex-opt-${item.id}`} checked={item.checked} />
+              <span>
+                <strong>{item.label}</strong>
+                <small>{item.hint}</small>
+              </span>
+            </label>
+          ))
+        }
+      </div>
+
+      <label class="ex__switch ex__switch--keep">
+        <input type="checkbox" id="ex-opt-orientation" checked />
+        <span>
+          <strong>Keep which way up the photo is</strong>
+          <small>
+            Writes back a 26-byte block holding nothing but the rotation. Without it a
+            phone photo can appear on its side.
+          </small>
+        </span>
+      </label>
+
+      <div class="ex__actions">
+        <button type="button" class="btn btn--primary" id="ex-clean">
+          <Icon name="trash" size={16} /> Remove metadata
+        </button>
+        <button type="button" class="btn" id="ex-clear">
+          <Icon name="x" size={16} /> Clear
+        </button>
+      </div>
+      <p class="ex__note" id="ex-note" aria-live="polite"></p>
+    </section>
+
+    <section class="ex__out" id="ex-out" aria-live="polite"></section>
+
+    <details class="panel ex__caveats">
+      <summary>What this tool does not do</summary>
+      <ul>
+        {READ_CAVEATS.map((caveat) => <li>{caveat}</li>)}
+      </ul>
+    </details>
+  </div>
+</ToolLayout>
+
+<style>
+  .ex { display: grid; gap: 1rem; }
+
+  .ex__promise {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--ink-dim);
+  }
+
+  .ex__controls { display: grid; gap: 0.9rem; }
+  .ex__switches {
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  }
+  .ex__switch {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.6rem;
+    align-items: start;
+    cursor: pointer;
+  }
+  .ex__switch input { margin-top: 0.25rem; }
+  .ex__switch strong { display: block; font-weight: 500; font-size: 0.9rem; }
+  .ex__switch small { color: var(--ink-faint); font-size: 0.78rem; line-height: 1.45; }
+  .ex__switch--keep {
+    border-top: 1px solid var(--line);
+    padding-top: 0.9rem;
+    max-width: 46rem;
+  }
+
+  .ex__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .ex__note { margin: 0; font-size: 0.85rem; color: var(--ink-dim); }
+  .ex__note:empty { display: none; }
+
+  .ex__out { display: grid; gap: 1rem; }
+  .ex__out:empty { display: none; }
+
+  .ex__caveats summary {
+    cursor: pointer;
+    font-size: 0.9rem;
+    font-weight: 500;
+  }
+  .ex__caveats ul {
+    margin: 0.75rem 0 0;
+    padding-left: 1.1rem;
+    color: var(--ink-dim);
+    font-size: 0.85rem;
+    display: grid;
+    gap: 0.4rem;
+  }
+</style>
+
+<!--
+  Runtime-built nodes carry no [data-astro-cid-*], so Astro's scoped CSS never
+  reaches them. Everything the script creates is styled here, namespaced under
+  .ex__out so it cannot leak. scripts/test-dom.mjs enforces this.
+-->
+<style is:global>
+  .ex__card {
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .ex__head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem 0.75rem;
+    padding: 0.75rem 0.9rem;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+  .ex__name {
+    font-weight: 500;
+    font-size: 0.92rem;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .ex__meta {
+    font-family: var(--mono);
+    font-size: 0.74rem;
+    color: var(--ink-faint);
+    margin-left: auto;
+  }
+  .ex__pill {
+    font-size: 0.7rem;
+    letter-spacing: 0.04em;
+    text-transform: uppercase;
+    padding: 0.1rem 0.45rem;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--ink-dim);
+  }
+  .ex__pill--risk { color: var(--bad); border-color: currentColor; }
+  .ex__pill--clean { color: var(--good); border-color: currentColor; }
+  .ex__pill--partial { color: var(--warn); border-color: currentColor; }
+
+  .ex__body { padding: 0.9rem; display: grid; gap: 0.9rem; }
+  .ex__verdict { margin: 0; font-size: 0.9rem; color: var(--ink); }
+  .ex__reason { margin: 0; font-size: 0.85rem; color: var(--ink-dim); }
+
+  .ex__group { display: grid; gap: 0.35rem; }
+  .ex__grouphead {
+    font-family: var(--mono);
+    font-size: 0.68rem;
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .ex__fields {
+    display: grid;
+    grid-template-columns: minmax(7rem, auto) minmax(0, 1fr);
+    gap: 0.2rem 0.75rem;
+    font-size: 0.85rem;
+  }
+  .ex__label { color: var(--ink-dim); }
+  .ex__value {
+    font-family: var(--mono);
+    font-size: 0.8rem;
+    overflow-wrap: anywhere;
+    min-width: 0;
+  }
+  .ex__value--flag { color: var(--bad); }
+
+  .ex__where {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+  }
+  .ex__block {
+    border: 1px solid var(--line);
+    padding: 0.1rem 0.4rem;
+    color: var(--ink-dim);
+  }
+
+  .ex__place {
+    display: grid;
+    gap: 0.4rem;
+    padding: 0.7rem 0.8rem;
+    border: 1px solid var(--bad);
+    background: color-mix(in srgb, var(--bad) 8%, transparent);
+  }
+  .ex__place strong { font-size: 0.85rem; }
+  .ex__coords { font-family: var(--mono); font-size: 0.8rem; }
+  .ex__placenote { font-size: 0.78rem; color: var(--ink-dim); margin: 0; }
+  .ex__maplink { font-size: 0.8rem; }
+
+  .ex__thumb {
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr);
+    gap: 0.75rem;
+    align-items: start;
+    padding: 0.7rem 0.8rem;
+    border: 1px solid var(--warn);
+    background: color-mix(in srgb, var(--warn) 8%, transparent);
+  }
+  .ex__thumb img {
+    width: 88px;
+    height: auto;
+    display: block;
+    border: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+  .ex__nothumb {
+    display: grid;
+    place-items: center;
+    width: 88px;
+    min-height: 66px;
+    padding: 0.4rem;
+    border: 1px dashed var(--line-strong);
+    background: var(--surface-2);
+    font-family: var(--mono);
+    font-size: 0.66rem;
+    line-height: 1.3;
+    text-align: center;
+    color: var(--ink-faint);
+  }
+  .ex__thumb p { margin: 0; font-size: 0.8rem; color: var(--ink-dim); }
+  .ex__thumb strong { font-size: 0.85rem; color: var(--ink); }
+
+  .ex__result {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.5rem 0.75rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--line);
+  }
+  .ex__saved { font-size: 0.85rem; color: var(--ink-dim); }
+  .ex__saved b { color: var(--ink); font-weight: 500; }
+
+  .ex__warn {
+    margin: 0;
+    font-size: 0.82rem;
+    color: var(--warn);
+  }
+</style>
+
+<script>
+  import { initDropzone } from '../../lib/ui/dropzone.ts';
+  import { formatBytes, savingsPercent, stemOf, withExtension, uniqueName } from '../../lib/ui/files.ts';
+  import { downloadBlob, zipFiles, blobBytes } from '../../lib/ui/download.ts';
+  import { LIMITS, screenFiles, describeRejections } from '../../lib/ui/limits.ts';
+  import { readMetadata, describeReport, summarise } from '../../lib/exif/read.ts';
+  import type { MetadataReport, MetadataField } from '../../lib/exif/read.ts';
+  import { stripMetadata } from '../../lib/exif/strip.ts';
+  import type { StripOptions } from '../../lib/exif/strip.ts';
+  import type { MetadataGroup } from '../../lib/exif/tags.ts';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const controls = $<HTMLElement>('ex-controls');
+  const out = $<HTMLElement>('ex-out');
+  const note = $<HTMLElement>('ex-note');
+  const cleanBtn = $<HTMLButtonElement>('ex-clean');
+  const clearBtn = $<HTMLButtonElement>('ex-clear');
+  const keepOrientation = $<HTMLInputElement>('ex-opt-orientation');
+
+  const OPTION_IDS = ['exif', 'xmp', 'iptc', 'comments', 'other', 'icc'] as const;
+  const optionInputs = new Map<string, HTMLInputElement>(
+    OPTION_IDS.map((id) => [id, $<HTMLInputElement>(`ex-opt-${id}`)]),
+  );
+
+  interface Entry {
+    name: string;
+    bytes: Uint8Array;
+    report: MetadataReport;
+    /** Set once this file has been cleaned. */
+    cleaned?: { bytes: Uint8Array; removed: number; warnings: string[] };
+  }
+
+  let entries: Entry[] = [];
+  /** Object URLs for thumbnail previews, revoked when the list is replaced. */
+  let urls: string[] = [];
+
+  const options = (): StripOptions => {
+    const picked: StripOptions = { keepOrientation: keepOrientation.checked };
+    for (const id of OPTION_IDS) picked[id] = optionInputs.get(id)!.checked;
+    return picked;
+  };
+
+  const el = (tag: string, cls?: string, text?: string): HTMLElement => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  const releaseUrls = () => {
+    for (const url of urls) URL.revokeObjectURL(url);
+    urls = [];
+  };
+
+  /* ---------------------------------------------------------------- reading */
+
+  async function load(files: File[]): Promise<void> {
+    // Every file's bytes stay in memory, and a cleaned copy joins them, so the
+    // batch total matters as much as any single file.
+    const held = entries.reduce((sum, entry) => sum + entry.bytes.length, 0);
+    const { accepted, rejected } = screenFiles(files, {
+      perFile: LIMITS.image,
+      total: LIMITS.batch,
+      alreadyHeld: held,
+    });
+    note.textContent = rejected.length ? describeRejections(rejected) : '';
+    if (!accepted.length) {
+      if (!entries.length) render();
+      return;
+    }
+
+    releaseUrls();
+    const loaded: Entry[] = [];
+    for (const file of accepted) {
+      const bytes = await blobBytes(file);
+      // fflate is only needed for PNG's deflated text chunks, so it is fetched
+      // on demand rather than shipped with the page.
+      let inflate: ((input: Uint8Array) => Uint8Array) | undefined;
+      if (bytes[0] === 0x89 && bytes[1] === 0x50) {
+        try {
+          ({ unzlibSync: inflate } = await import('fflate'));
+        } catch {
+          inflate = undefined;
+        }
+      }
+      loaded.push({ name: file.name, bytes, report: readMetadata(bytes, inflate) });
+    }
+
+    entries = loaded;
+    controls.hidden = false;
+    render();
+  }
+
+  /* --------------------------------------------------------------- cleaning */
+
+  function clean(): void {
+    const picked = options();
+    let anyDone = false;
+    for (const entry of entries) {
+      if (!entry.report.rewritable) continue;
+      const outcome = stripMetadata(entry.bytes, picked);
+      if (!outcome.ok) continue;
+      entry.cleaned = {
+        bytes: outcome.bytes,
+        removed: outcome.bytesRemoved,
+        warnings: outcome.warnings,
+      };
+      anyDone = true;
+    }
+    if (!anyDone) {
+      note.textContent = 'None of these files can be cleaned yet.';
+      return;
+    }
+    note.textContent = '';
+    render();
+  }
+
+  function download(entry: Entry): void {
+    if (!entry.cleaned) return;
+    const stem = stemOf(entry.name);
+    const extension = entry.name.includes('.') ? entry.name.slice(entry.name.lastIndexOf('.') + 1) : 'jpg';
+    const name = withExtension(`${stem}-clean`, extension);
+    // Copy into a fresh buffer so the Blob does not hold a view onto the input.
+    const copy = new Uint8Array(entry.cleaned.bytes);
+    downloadBlob(new Blob([copy], { type: `image/${extension.toLowerCase()}` }), name);
+  }
+
+  async function downloadAll(): Promise<void> {
+    const done = entries.filter((entry) => entry.cleaned);
+    if (!done.length) return;
+    if (done.length === 1) {
+      download(done[0]);
+      return;
+    }
+    const taken = new Set<string>();
+    const files = done.map((entry) => {
+      const stem = stemOf(entry.name);
+      const extension = entry.name.includes('.')
+        ? entry.name.slice(entry.name.lastIndexOf('.') + 1)
+        : 'jpg';
+      const name = uniqueName(withExtension(`${stem}-clean`, extension), taken);
+      taken.add(name);
+      return { name, data: new Uint8Array(entry.cleaned!.bytes) };
+    });
+    downloadBlob(await zipFiles(files), 'metadata-removed.zip');
+  }
+
+  /* -------------------------------------------------------------- rendering */
+
+  const GROUP_LABELS: Record<MetadataGroup, string> = {
+    location: 'Where',
+    device: 'Device',
+    time: 'When',
+    authorship: 'People & credits',
+    software: 'Software',
+    technical: 'Technical',
+  };
+
+  const GROUP_ORDER: MetadataGroup[] = [
+    'location', 'device', 'time', 'authorship', 'software', 'technical',
+  ];
+
+  function fieldGroups(fields: MetadataField[]): HTMLElement[] {
+    const byGroup = new Map<MetadataGroup, MetadataField[]>();
+    for (const field of fields) {
+      const list = byGroup.get(field.group) ?? [];
+      list.push(field);
+      byGroup.set(field.group, list);
+    }
+
+    const sections: HTMLElement[] = [];
+    for (const group of GROUP_ORDER) {
+      const list = byGroup.get(group);
+      if (!list?.length) continue;
+      const section = el('div', 'ex__group');
+      section.append(el('p', 'ex__grouphead', GROUP_LABELS[group]));
+      const grid = el('div', 'ex__fields');
+      for (const field of list) {
+        grid.append(el('span', 'ex__label', field.label));
+        grid.append(
+          el('span', `ex__value${field.sensitive ? ' ex__value--flag' : ''}`, field.value),
+        );
+      }
+      section.append(grid);
+      sections.push(section);
+    }
+    return sections;
+  }
+
+  function placeCard(report: MetadataReport): HTMLElement {
+    const place = el('div', 'ex__place');
+    place.append(el('strong', undefined, 'This photo records where it was taken'));
+    const coords = report.coordinates!;
+    place.append(
+      el('span', 'ex__coords', `${coords.latitude.toFixed(6)}, ${coords.longitude.toFixed(6)}`),
+    );
+    place.append(el('span', 'ex__coords', coords.dms));
+
+    // Deliberately a link and not a map: loading a map tile would send this
+    // location to a third party, which is the opposite of the point.
+    const link = el('a', 'ex__maplink') as HTMLAnchorElement;
+    link.href = `https://www.openstreetmap.org/?mlat=${coords.latitude}&mlon=${coords.longitude}#map=16/${coords.latitude}/${coords.longitude}`;
+    link.target = '_blank';
+    link.rel = 'noopener noreferrer';
+    link.textContent = 'Open in OpenStreetMap';
+    place.append(link);
+    place.append(
+      el(
+        'p',
+        'ex__placenote',
+        'No map is drawn here on purpose — fetching one would disclose this location to another site. Opening the link does.',
+      ),
+    );
+    return place;
+  }
+
+  function thumbnailCard(report: MetadataReport): HTMLElement {
+    const wrap = el('div', 'ex__thumb');
+    const copy = new Uint8Array(report.thumbnail!);
+    const url = URL.createObjectURL(new Blob([copy], { type: 'image/jpeg' }));
+    urls.push(url);
+    const image = el('img') as HTMLImageElement;
+    image.src = url;
+    image.alt = 'The preview image stored inside this file';
+    image.loading = 'lazy';
+    // A preview can be truncated or not a JPEG at all. Showing a broken image
+    // icon would read as the tool failing, when the finding — that a second
+    // image is in there — still stands.
+    image.addEventListener('error', () => {
+      const fallback = el('span', 'ex__nothumb', 'preview unreadable');
+      image.replaceWith(fallback);
+    });
+    wrap.append(image);
+    const text = el('div');
+    text.append(el('strong', undefined, 'There is a second image hidden inside this one'));
+    text.append(
+      el(
+        'p',
+        undefined,
+        'Cameras store a small preview when the photo is taken, and most editors keep it. If this picture was cropped or retouched, the preview may still show the original.',
+      ),
+    );
+    wrap.append(text);
+    return wrap;
+  }
+
+  function card(entry: Entry): HTMLElement {
+    const { report } = entry;
+    const node = el('div', 'ex__card');
+
+    const head = el('div', 'ex__head');
+    head.append(el('span', 'ex__name', entry.name));
+
+    const summary = summarise(report);
+    let pill: HTMLElement;
+    if (!report.container) {
+      pill = el('span', 'ex__pill', 'unreadable');
+    } else if (!report.rewritable) {
+      pill = el('span', 'ex__pill ex__pill--partial', `${report.container} — read only`);
+    } else if (!report.blocks.length) {
+      pill = el('span', 'ex__pill ex__pill--clean', 'already clean');
+    } else {
+      pill = el(
+        'span',
+        `ex__pill ${summary.sensitive ? 'ex__pill--risk' : ''}`,
+        summary.sensitive ? `${summary.sensitive} identifying` : `${report.blocks.length} blocks`,
+      );
+    }
+    head.append(pill);
+    head.append(
+      el('span', 'ex__meta', `${formatBytes(report.fileBytes)} · ${formatBytes(report.metadataBytes)} metadata`),
+    );
+    node.append(head);
+
+    const body = el('div', 'ex__body');
+    body.append(el('p', 'ex__verdict', describeReport(report)));
+
+    if (!report.rewritable && report.container) {
+      body.append(
+        el(
+          'p',
+          'ex__reason',
+          `${report.container.toUpperCase()} keeps its metadata in a structure this tool cannot rewrite yet, so this file can be identified but not cleaned.`,
+        ),
+      );
+    }
+
+    if (report.blocks.length) {
+      const where = el('div', 'ex__where');
+      for (const block of report.blocks) {
+        where.append(
+          el('span', 'ex__block', block.keyword ? `${block.where}: ${block.keyword}` : block.where),
+        );
+      }
+      body.append(where);
+    }
+
+    if (report.coordinates) body.append(placeCard(report));
+    if (report.thumbnail) body.append(thumbnailCard(report));
+    for (const section of fieldGroups(report.fields)) body.append(section);
+
+    for (const warning of report.warnings) {
+      body.append(el('p', 'ex__warn', warning));
+    }
+
+    if (entry.cleaned) {
+      const result = el('div', 'ex__result');
+      const after = report.fileBytes - entry.cleaned.removed;
+      const saved = el('span', 'ex__saved');
+      saved.append(document.createTextNode('Cleaned — '));
+      const strong = el('b', undefined, formatBytes(entry.cleaned.removed));
+      saved.append(strong);
+      saved.append(
+        document.createTextNode(
+          ` removed, ${formatBytes(after)} left (${savingsPercent(report.fileBytes, after)}% smaller). The image itself is untouched.`,
+        ),
+      );
+      result.append(saved);
+
+      const button = el('button', 'btn btn--primary') as HTMLButtonElement;
+      button.type = 'button';
+      button.textContent = 'Download';
+      button.addEventListener('click', () => download(entry));
+      result.append(button);
+      body.append(result);
+
+      for (const warning of entry.cleaned.warnings) {
+        body.append(el('p', 'ex__warn', warning));
+      }
+    }
+
+    node.append(body);
+    return node;
+  }
+
+  function render(): void {
+    out.replaceChildren();
+    if (!entries.length) {
+      controls.hidden = true;
+      return;
+    }
+
+    const fragment = document.createDocumentFragment();
+    for (const entry of entries) fragment.append(card(entry));
+
+    const done = entries.filter((entry) => entry.cleaned);
+    if (done.length > 1) {
+      const all = el('div', 'ex__result');
+      const button = el('button', 'btn btn--primary') as HTMLButtonElement;
+      button.type = 'button';
+      button.textContent = `Download all ${done.length} as a zip`;
+      button.addEventListener('click', () => void downloadAll());
+      all.append(button);
+      fragment.append(all);
+    }
+
+    out.append(fragment);
+  }
+
+  /* ----------------------------------------------------------------- wiring */
+
+  initDropzone('ex-file', {
+    accept: ['image/'],
+    // Windows reports no MIME type for .heic often enough to matter, and those
+    // are exactly the files someone brings here.
+    extensions: ['jpg', 'jpeg', 'png', 'webp', 'heic', 'heif', 'avif', 'tif', 'tiff'],
+    paste: true,
+    maxBytes: LIMITS.image,
+    onTooLarge: (_rejected, message) => {
+      note.textContent = message;
+    },
+    onFiles: (files) => void load(files),
+  });
+
+  cleanBtn.addEventListener('click', clean);
+
+  clearBtn.addEventListener('click', () => {
+    releaseUrls();
+    entries = [];
+    note.textContent = '';
+    render();
+  });
+
+  // Changing what to remove invalidates any result already on screen.
+  for (const input of [...optionInputs.values(), keepOrientation]) {
+    input.addEventListener('change', () => {
+      let changed = false;
+      for (const entry of entries) {
+        if (entry.cleaned) {
+          delete entry.cleaned;
+          changed = true;
+        }
+      }
+      if (changed) render();
+    });
+  }
+</script>

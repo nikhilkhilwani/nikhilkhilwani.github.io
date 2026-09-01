@@ -34,6 +34,15 @@ export const tools: ToolMeta[] = [
     category: 'image',
   },
   {
+    slug: 'exif-remover',
+    title: 'EXIF Viewer & Remover',
+    description:
+      'See what a photo gives away — location, device, serial number, timestamps — and strip it without re-encoding the image.',
+    icon: 'tag',
+    status: 'available',
+    category: 'image',
+  },
+  {
     slug: 'image-converter',
     title: 'Image Converter',
     description: 'Convert images between PNG, JPEG, and WebP with a quality dial. Nothing is uploaded.',

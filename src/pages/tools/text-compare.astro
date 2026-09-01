@@ -212,14 +212,38 @@ import Icon from '../../components/Icon.astro';
   .tc__row--replace .tc__sign { color: var(--good); }
   .tc__row--delete .tc__sign { color: var(--bad); }
 
-  /* Word-level highlight inside a changed line. */
+  /* Word-level highlight inside a changed line.
+     The decoration is not decoration: it is the cue that survives when colour
+     cannot be relied on. Red and green are the worst possible pair to encode
+     meaning in — roughly 8% of men cannot separate them — and Windows high
+     contrast drops author background colours entirely, which would leave a
+     changed word with no marking at all. Struck-through for removed and
+     underlined for added is the same convention Word's tracked changes uses,
+     so it needs no explaining.
+
+     Radius comes from the token rather than a hardcoded 2px, which was a
+     leftover from a rounded theme and squared off with the rest of the site. */
   .tc__word--insert {
     background: color-mix(in srgb, var(--good) 32%, transparent);
-    border-radius: 2px;
+    border-radius: var(--r-sm);
+    text-decoration: underline;
+    text-decoration-thickness: 2px;
+    text-underline-offset: 2px;
   }
   .tc__word--delete {
     background: color-mix(in srgb, var(--bad) 32%, transparent);
-    border-radius: 2px;
+    border-radius: var(--r-sm);
+    text-decoration: line-through;
+  }
+
+  /* Forced-colors drops the washes above. The decorations survive on their own,
+     but an outline keeps the EXTENT of each change readable — where a run of
+     changed words starts and stops. */
+  @media (forced-colors: active) {
+    .tc__word--insert,
+    .tc__word--delete {
+      outline: 1px solid currentColor;
+    }
   }
 
   .tc__same {

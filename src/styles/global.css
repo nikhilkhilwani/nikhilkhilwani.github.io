@@ -22,7 +22,15 @@
      semantics re-picked for a light ground, each ≥5.2 on both bg and surface. */
   --warn: #8a5a00;
   --bad: #b3261e;
-  --good: #1f6b3a;
+  /* Purer and darker than the #1f6b3a it replaces, for a measured reason: the
+     diff highlights wash --good and --bad over white at the SAME alpha, so any
+     mismatch in colourfulness shows up as one side looking weaker. The old
+     green carried OKLCH chroma 0.108 against red's 0.178, so its 32% wash came
+     out at chroma 0.035 against red's 0.052 — 1.5x less colourful, which read
+     as grey rather than green. This lands the wash at 0.0523, matching red
+     exactly, and because it is darker it also raises contrast rather than
+     spending it: 7.28 on white and 6.43 on the ground, up from 6.52 and 5.75. */
+  --good: #0e6506;
   /* Rules are now dark-on-light, and deliberately stronger than the dark
      themes' whisper: Swiss layout is held together by visible 1px rules, so
      this is a design choice rather than a parity target. */

@@ -217,6 +217,12 @@ for (const htmlPath of htmlFiles.sort()) {
     for (const re of [
       /\.className\s*=\s*["']([^"']+)["']/g,
       /classList\.add\(\s*["']([^"']+)["']/g,
+      // Pages that build nodes through a helper -- el('div', 'ex__card') --
+      // never write .className with a literal, so the two patterns above see
+      // nothing and the whole page slips past this check unguarded. Match the
+      // house naming convention instead: a two-or-three letter page prefix,
+      // a double underscore, then the block name.
+      /["']((?:[a-z]{2,3}__[\w-]+)(?:\s+[a-z]{2,3}__[\w-]+)*)["']/g,
     ]) {
       for (const m of js.matchAll(re)) {
         for (const cls of m[1].split(/\s+/)) if (cls) runtimeClasses.add(cls);
