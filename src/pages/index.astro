@@ -20,11 +20,6 @@ const sections = [
   description={`Personal portfolio of ${profile.name}. ${liveCount} free, private, browser-based file tools — no uploads and no accounts.`}
 >
   <div class="shell hero">
-    <p class="badge fade">
-      <span class="dot" aria-hidden="true"></span>
-      {liveCount} free tools live
-    </p>
-
     <h1 class="fade">Nikhil<span class="sur">Khilwani</span></h1>
 
     <div class="rule fade" aria-hidden="true"></div>
@@ -114,33 +109,6 @@ const sections = [
     flex-direction: column;
     justify-content: center;
     padding-block: clamp(40px, 8vw, 80px) clamp(32px, 6vw, 64px);
-  }
-
-  .badge {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.6em;
-    align-self: flex-start;
-    margin: 0;
-    padding: 0.5em 1em;
-    border: 1px solid var(--line);
-    border-radius: var(--r-pill);
-    background: var(--lift-1);
-    font-size: 0.72rem;
-    letter-spacing: 0.16em;
-    text-transform: uppercase;
-    color: var(--ink-dim);
-  }
-  .dot {
-    width: 7px; height: 7px;
-    border-radius: 50%;
-    background: var(--accent);
-    animation: pulse 2.4s ease-out infinite;
-  }
-  @keyframes pulse {
-    0% { box-shadow: 0 0 0 0 rgb(var(--accent-rgb) / 0.5); }
-    70% { box-shadow: 0 0 0 11px rgb(var(--accent-rgb) / 0); }
-    100% { box-shadow: 0 0 0 0 rgb(var(--accent-rgb) / 0); }
   }
 
   h1 {
@@ -264,7 +232,6 @@ const sections = [
     transform: translateY(14px);
     animation: rise 0.9s cubic-bezier(0.22, 0.68, 0, 1) forwards;
   }
-  .badge.fade { animation-delay: 0.05s; }
   h1.fade { animation-delay: 0.16s; }
   .rule.fade { animation-delay: 0.3s; }
   .lede.fade { animation-delay: 0.4s; }
@@ -279,6 +246,5 @@ const sections = [
 
   @media (prefers-reduced-motion: reduce) {
     .fade { animation: none; opacity: 1; transform: none; }
-    .dot { animation: none; }
   }
 </style>

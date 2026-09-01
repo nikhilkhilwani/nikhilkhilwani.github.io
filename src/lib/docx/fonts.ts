@@ -67,6 +67,12 @@ export type FontSource = (file: string) => Promise<Uint8Array>;
 export interface FontSet {
   faces: Record<StyleKey, PDFFont>;
   hasGlyph: (codePoint: number) => boolean;
+  /**
+   * True when every face is the same file, so bold and italic have to be
+   * synthesised at draw time. The Noto script fonts bundled here ship one
+   * weight, and pdf-lib cannot instantiate a variable font's wght axis.
+   */
+  synthetic: boolean;
 }
 
 export interface LoadedFonts {
@@ -192,6 +198,8 @@ export async function loadFonts(
         boldItalic: embedded.get('boldItalic') ?? regular,
       },
       hasGlyph: glyphProbe(fontkit, bytes.get('regular')!),
+      // Carlito ships all four faces, so nothing needs synthesising.
+      synthetic: false,
     });
   } catch {
     return null;
@@ -208,12 +216,12 @@ export async function loadFonts(
     try {
       const bytes = await source(meta.file);
       const face = await pdf.embedFont(bytes, { subset: true });
-      // Noto ships one weight per script here, so bold and italic reuse it.
-      // Synthesising either would need a variable-font instance pdf-lib cannot
-      // build, and drawing the regular weight beats drawing nothing.
+      // Noto ships one weight per script here, so all four faces are the same
+      // file and `synthetic` tells the renderer to embolden and slant itself.
       sets.set(key, {
         faces: { regular: face, bold: face, italic: face, boldItalic: face },
         hasGlyph: glyphProbe(fontkit, bytes),
+        synthetic: true,
       });
     } catch {
       missing.push(key);

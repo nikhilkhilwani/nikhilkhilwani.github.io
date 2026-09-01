@@ -471,6 +471,8 @@ export interface StyleProps {
   align?: Align;
   indent?: number;
   firstLine?: number;
+  /** Tab stops, so a style or a table cell can declare them too. */
+  tabs?: TabStop[];
   spaceBefore?: number;
   spaceAfter?: number;
   lineMultiple?: number;
@@ -524,6 +526,17 @@ export function readSpacingLike(pPr: string): StyleProps {
 
   const ctx = /<w:contextualSpacing\b([^>]*)\/?>/.exec(pPr);
   if (ctx && !/w:val\s*=\s*"(0|false)"/.test(ctx[1])) out.contextualSpacing = true;
+
+  const tabs: TabStop[] = [];
+  for (const tab of pPr.match(/<w:tab\b[^>]*\/?>/g) ?? []) {
+    const pos = /w:pos\s*=\s*"([^"]*)"/.exec(tab)?.[1];
+    const val = /w:val\s*=\s*"([^"]*)"/.exec(tab)?.[1] ?? 'left';
+    // "clear" removes an inherited stop rather than declaring one.
+    if (pos === undefined || val === 'clear') continue;
+    const align = val === 'right' || val === 'center' || val === 'decimal' ? val : 'left';
+    tabs.push({ pos: twips(pos), align });
+  }
+  if (tabs.length) out.tabs = tabs.sort((a, b) => a.pos - b.pos);
 
   return out;
 }

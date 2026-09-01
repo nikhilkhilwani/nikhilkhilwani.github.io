@@ -39,9 +39,10 @@
     content: '';
     position: absolute;
     inset: 0;
-    /* --line is 0.18 dark-on-light, so the effective grid contrast is ~0.08.
-       Strong enough to read as structure, weak enough to sit under text. */
-    opacity: 0.45;
+    /* --line is 0.18 dark-on-light in the light theme, 0.12 white-on-dark in
+       the dark one — so the multiplier has to follow the theme to keep the grid
+       reading the same at both values. */
+    opacity: var(--grid-op);
     background-image:
       linear-gradient(var(--line) 1px, transparent 1px),
       linear-gradient(90deg, var(--line) 1px, transparent 1px);

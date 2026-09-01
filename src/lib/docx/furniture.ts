@@ -15,7 +15,7 @@
  * the number is measured and aligned like any other text.
  */
 
-import type { Block, Run } from './blocks.ts';
+import type { Block, Cell, Run } from './blocks.ts';
 import type { Align, TabStop } from './wordxml.ts';
 import { TWIP } from './wordxml.ts';
 
@@ -237,8 +237,19 @@ export interface FurnitureBlock {
  * is "left<tab>centre<tab>right", and without the stops it collapses into one
  * run of text.
  */
-export function parseFurniture(xml: string, page: number, total: number): FurnitureBlock[] {
-  return parseParagraphBlocks(substituteFields(xml, page, total));
+/**
+ * Resolves a drawing's relationship id to a data URI, or undefined if the part
+ * is missing or in a format that cannot be embedded.
+ */
+export type ImageResolver = (relationshipId: string) => string | undefined;
+
+export function parseFurniture(
+  xml: string,
+  page: number,
+  total: number,
+  images?: ImageResolver,
+): FurnitureBlock[] {
+  return parseParagraphBlocks(substituteFields(xml, page, total), images);
 }
 
 /**
@@ -247,12 +258,64 @@ export function parseFurniture(xml: string, page: number, total: number): Furnit
  * Shared by headers, footers and text boxes: all three are content mammoth
  * never sees, and all three are paragraph-shaped.
  */
-export function parseParagraphBlocks(resolved: string): FurnitureBlock[] {
+export function parseParagraphBlocks(
+  resolved: string,
+  images?: ImageResolver,
+): FurnitureBlock[] {
   const out: FurnitureBlock[] = [];
 
-  // Only the top-level body paragraphs. A paragraph inside a table would be
-  // parsed here too, which is wrong but harmless: its text still shows.
-  for (const paragraph of resolved.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []) {
+  // Tables are pulled out first and their paragraphs removed, so the paragraph
+  // sweep below cannot also emit the cell text as loose lines. A header table
+  // is how letterheads put a logo beside an address.
+  let flow = resolved;
+  const tables: { at: number; block: Block }[] = [];
+  for (const tbl of resolved.match(/<w:tbl>[\s\S]*?<\/w:tbl>/g) ?? []) {
+    const rows: Cell[][] = [];
+    for (const tr of tbl.match(/<w:tr\b[^>]*>[\s\S]*?<\/w:tr>/g) ?? []) {
+      const cells: Cell[] = [];
+      for (const tc of tr.match(/<w:tc\b[^>]*>[\s\S]*?<\/w:tc>/g) ?? []) {
+        const tcPr = /<w:tcPr\b[^>]*>([\s\S]*?)<\/w:tcPr>/.exec(tc)?.[1] ?? '';
+        const vMerge = /<w:vMerge\b([^>]*)\/?>/.exec(tcPr);
+        if (vMerge && !/w:val\s*=\s*"restart"/.test(vMerge[1])) continue;
+        const span = Number(/<w:gridSpan\b[^>]*w:val\s*=\s*"(\d+)"/.exec(tcPr)?.[1] ?? '1');
+        const runs: Run[] = [];
+        for (const paragraph of tc.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []) {
+          runs.push(...readRuns(paragraph));
+        }
+        cells.push({ runs, span: Number.isFinite(span) && span >= 1 ? span : 1 });
+      }
+      if (cells.length) rows.push(cells);
+    }
+    if (rows.length) tables.push({ at: resolved.indexOf(tbl), block: { kind: 'table', rows } });
+    flow = flow.replace(tbl, '');
+  }
+
+  for (const paragraph of flow.match(/<w:p\b[^>]*>[\s\S]*?<\/w:p>/g) ?? []) {
+    // An inline logo, resolved through the part's own relationships.
+    if (images) {
+      for (const embed of paragraph.match(/<a:blip\b[^>]*r:embed\s*=\s*"([^"]*)"/g) ?? []) {
+        const id = /r:embed\s*=\s*"([^"]*)"/.exec(embed)?.[1];
+        const dataUri = id ? images(id) : undefined;
+        if (!dataUri) continue;
+        const extent = /<wp:extent\s+cx="(\d+)"\s+cy="(\d+)"/.exec(paragraph);
+        const EMU_PER_PT = 914400 / 72;
+        out.push({
+          block: {
+            kind: 'image',
+            dataUri,
+            ...(extent
+              ? {
+                  width: Number(extent[1]) / EMU_PER_PT,
+                  height: Number(extent[2]) / EMU_PER_PT,
+                }
+              : {}),
+          },
+          align: 'left',
+          tabs: [],
+        });
+      }
+    }
+
     const runs = readRuns(paragraph);
     if (!runs.length) continue;
 
@@ -273,7 +336,12 @@ export function parseParagraphBlocks(resolved: string): FurnitureBlock[] {
     out.push({ block: { kind: 'paragraph', runs }, align, tabs });
   }
 
-  return out;
+  // Tables first: in a letterhead the table IS the header, and anything loose
+  // sits under it.
+  return [
+    ...tables.map((entry) => ({ block: entry.block, align: 'left' as Align, tabs: [] })),
+    ...out,
+  ];
 }
 
 /** One text box's content and the text of the paragraph it is anchored in. */

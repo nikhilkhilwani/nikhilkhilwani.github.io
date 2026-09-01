@@ -87,6 +87,8 @@ export interface Piece {
   color?: string;
   /** Six hex digits painted behind the glyphs. */
   highlight?: string;
+  /** In-document anchor, carried so footnote placement can find its markers. */
+  anchor?: string;
   size: number;
   x: number;
   /** Measured width, so the renderer can draw rules and link targets. */
@@ -127,7 +129,12 @@ export interface LayoutOptions {
    * body flowing underneath them.
    */
   insetTop?: number;
-  insetBottom?: number;
+  /**
+   * Space to keep clear at the foot of a page. A function when it varies per
+   * page, which is what footnotes need: each page reserves room for its own
+   * notes and no others.
+   */
+  insetBottom?: number | ((pageIndex: number) => number);
   /**
    * A loaded bidi-js instance. Without it right-to-left lines stay in logical
    * order, which is what shipped before. Supplied by topdf.ts, which can await
@@ -257,6 +264,7 @@ export function wrapRuns(
       font: string;
       color?: string;
       highlight?: string;
+      anchor?: string;
     };
     rise: number;
   }[] = [];
@@ -278,6 +286,7 @@ export function wrapRuns(
         font: segment.script,
         color: run.color,
         highlight: run.highlight,
+        anchor: run.anchor,
       };
       for (const text of segment.text.split(/(\t|\n|[^\S\t\n]+)/).filter((t) => t.length)) {
         const w = text === '\t' || text === '\n' ? 0 : measure(text, style);
@@ -472,8 +481,11 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
   // Header and footer bands sit inside the margin, so the body has to start
   // lower and stop higher or it would print straight over them.
   const insetTop = Math.max(0, options.insetTop ?? 0);
-  const insetBottom = Math.max(0, options.insetBottom ?? 0);
-  const bottom = geometry.margin + insetBottom;
+  const insetBottomFor = (index: number) => {
+    const given = options.insetBottom;
+    const value = typeof given === 'function' ? given(index) : given;
+    return Math.max(0, value ?? 0);
+  };
   const top = geometry.height - geometry.margin - insetTop;
 
   const pages: LaidOutPage[] = [];
@@ -499,7 +511,9 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
     left = geometry.margin;
     y = top;
   };
-  const room = (needed: number) => y - needed >= bottom;
+  // Recomputed per call rather than captured: with footnotes the floor differs
+  // from page to page, and a page's own notes must not squeeze the page before.
+  const room = (needed: number) => y - needed >= geometry.margin + insetBottomFor(pages.length);
 
   for (const [index, block] of blocks.entries()) {
     if (block.kind === 'rule') {
@@ -560,6 +574,9 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
         span: number;
         rowSpan: number;
         lines: Line[];
+        /** Derived once: wrapping and drawing must agree on the indent. */
+        indent: number;
+        reserve: number;
       }[] = [];
       let columns = 1;
 
@@ -570,7 +587,18 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
           const span = Math.max(1, cell.span);
           // Clamped so a rowspan reaching past the last row cannot run away.
           const rowSpan = Math.min(Math.max(1, cell.rowSpan ?? 1), rowCount - r);
-          placed.push({ cell, row: r, start: c, span, rowSpan, lines: [] });
+          placed.push({
+            cell,
+            row: r,
+            start: c,
+            span,
+            rowSpan,
+            lines: [],
+            indent: Math.max(0, cell.indent ?? 0),
+            // A positive first-line indent narrows every line rather than
+            // letting the first overflow; a hanging indent leaves width alone.
+            reserve: Math.max(0, cell.firstLine ?? 0),
+          });
           for (let rr = r; rr < r + rowSpan; rr++) {
             for (let cc = c; cc < c + span; cc++) occupied[rr][cc] = true;
           }
@@ -596,9 +624,16 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
       const rowHeights = new Array<number>(rowCount).fill(cellLine + padding * 2);
       for (const item of placed) {
         const width = spanWidth(widths, item.start, item.span, gap);
-        const inner = width - padding * 2;
+        const inner = Math.max(24, width - padding * 2 - item.indent - item.reserve);
+
+        // Stops are measured from the cell's left edge, so shift them by the
+        // indent the same way the paragraph branch does.
+        const cellTabs = (item.cell.tabs ?? [])
+          .map((tab) => ({ ...tab, pos: tab.pos - item.indent }))
+          .filter((tab) => tab.pos > 0);
+
         // Cell text used to be left-aligned whatever the document said.
-        const wrapped = wrapRuns(item.cell.runs, scale.body, inner, measure, [], {
+        const wrapped = wrapRuns(item.cell.runs, scale.body, inner, measure, cellTabs, {
           bidi: options.bidi,
         });
         item.lines = wrapped.map((line, i) =>
@@ -655,8 +690,15 @@ export function layout(blocks: Block[], options: LayoutOptions): LaidOutPage[] {
           const cellTop = top - offset[item.row];
           items.push({ kind: 'cellBox', x, y: cellTop - height, width, height });
           let ty = cellTop - padding - (item.cell.spaceBefore ?? 0) - Math.max(scale.body, item.lines[0]?.height ?? 0);
-          for (const line of item.lines) {
-            items.push({ kind: 'line', x: x + padding, y: ty, line });
+          for (const [i, line] of item.lines.entries()) {
+            // Only the first line takes the first-line offset.
+            const offset = i === 0 ? (item.cell.firstLine ?? 0) : 0;
+            items.push({
+              kind: 'line',
+              x: x + padding + item.indent + item.reserve + offset,
+              y: ty,
+              line,
+            });
             ty -= advanceOf(line);
           }
         }

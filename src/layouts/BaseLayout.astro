@@ -36,6 +36,27 @@ const year = new Date().getFullYear();
     <meta name="description" content={description} />
     <link rel="canonical" href={canonical} />
     <meta name="theme-color" content="#eef1f4" />
+    {/* Runs before first paint, and is:inline so Astro neither bundles nor
+        defers it. Without this the light palette paints first and a stored dark
+        choice applies a frame later, so every navigation flashes white. It
+        resolves the system preference itself rather than leaning on the media
+        query, which is what lets the CSS key the toggle icon off one attribute. */}
+    <script is:inline>
+      (function () {
+        var root = document.documentElement;
+        var stored = null;
+        try { stored = localStorage.getItem('theme'); } catch (e) {}
+        var mode =
+          stored === 'light' || stored === 'dark'
+            ? stored
+            : window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+              ? 'dark'
+              : 'light';
+        root.dataset.theme = mode;
+        var meta = document.querySelector('meta[name="theme-color"]');
+        if (meta) meta.setAttribute('content', mode === 'dark' ? '#0e1319' : '#eef1f4');
+      })();
+    </script>
     <meta property="og:title" content={title} />
     <meta property="og:description" content={description} />
     <meta property="og:type" content="website" />
@@ -63,20 +84,30 @@ const year = new Date().getFullYear();
               <span class="hdr__mark">NK</span>
               <span class="hdr__name">Nikhil Khilwani</span>
             </a>
-            <nav class="hdr__nav" aria-label="Main">
-              {
-                NAV.map((item) => (
-                  <a
-                    href={item.href}
-                    aria-current={
-                      path === item.href || path.startsWith(`${item.href}/`) ? 'page' : undefined
-                    }
-                  >
-                    {item.label}
-                  </a>
-                ))
-              }
-            </nav>
+            <div class="hdr__right">
+              <nav class="hdr__nav" aria-label="Main">
+                {
+                  NAV.map((item) => (
+                    <a
+                      href={item.href}
+                      aria-current={
+                        path === item.href || path.startsWith(`${item.href}/`) ? 'page' : undefined
+                      }
+                    >
+                      {item.label}
+                    </a>
+                  ))
+                }
+              </nav>
+              {/* Both glyphs ship; CSS shows whichever matches the resolved
+                  theme, so switching needs no DOM surgery. The label is set by
+                  the script, because it has to name the ACTION rather than the
+                  state to be any use to a screen reader. */}
+              <button id="th-toggle" class="hdr__theme" type="button" aria-label="Switch theme">
+                <Icon name="moon" size={15} class="th-moon" />
+                <Icon name="sun" size={15} class="th-sun" />
+              </button>
+            </div>
           </div>
         </header>
       )
@@ -144,7 +175,7 @@ const year = new Date().getFullYear();
     letter-spacing: 0.02em;
     color: var(--accent);
     border: 1px solid var(--line-strong);
-    border-radius: 8px;
+    border-radius: var(--r-sm);
     width: 30px; height: 30px;
     display: grid; place-items: center;
     flex: 0 0 auto;
@@ -209,5 +240,117 @@ const year = new Date().getFullYear();
   .ftr__note { display: inline-flex; align-items: center; gap: 0.45rem; }
   @media (max-width: 640px) {
     .ftr__in { font-size: 0.72rem; }
+  }
+</style>
+
+<script>
+  /**
+   * Theme toggle. The palette itself is entirely CSS — this only decides which
+   * of the three states the document is in, and remembers it.
+   */
+  type Mode = 'light' | 'dark';
+
+  const KEY = 'theme';
+  const COLOR: Record<Mode, string> = { light: '#eef1f4', dark: '#0e1319' };
+
+  const root = document.documentElement;
+  const btn = document.getElementById('th-toggle');
+  const meta = document.querySelector('meta[name="theme-color"]');
+  const darkQuery = window.matchMedia('(prefers-color-scheme: dark)');
+
+  /** null when the visitor has never chosen, so the OS still leads. */
+  function stored(): Mode | null {
+    try {
+      const v = localStorage.getItem(KEY);
+      return v === 'light' || v === 'dark' ? v : null;
+    } catch {
+      // Private mode and blocked site data both throw on access.
+      return null;
+    }
+  }
+
+  function apply(mode: Mode) {
+    root.dataset.theme = mode;
+    meta?.setAttribute('content', COLOR[mode]);
+    // The label names the ACTION, not the state — "dark theme" on a button
+    // that switches to light tells a screen-reader user nothing.
+    const label = mode === 'dark' ? 'Switch to light theme' : 'Switch to dark theme';
+    btn?.setAttribute('aria-label', label);
+    btn?.setAttribute('title', label);
+  }
+
+  // The inline head script already stamped the attribute; this only catches up
+  // the label and title, which it deliberately left alone.
+  apply(root.dataset.theme === 'dark' ? 'dark' : 'light');
+
+  btn?.addEventListener('click', () => {
+    const next = root.dataset.theme === 'dark' ? 'light' : 'dark';
+    try {
+      localStorage.setItem(KEY, next);
+    } catch {
+      // Not fatal — the choice just will not survive a reload.
+    }
+    apply(next);
+  });
+
+  // Keep following the OS for as long as the visitor has not overridden it.
+  darkQuery.addEventListener('change', (e) => {
+    if (!stored()) apply(e.matches ? 'dark' : 'light');
+  });
+</script>
+
+<style>
+  /* Nav and toggle travel together, so the toggle stays put when the nav wraps. */
+  .hdr__right {
+    display: flex;
+    align-items: center;
+    gap: 1.15rem;
+    min-width: 0;
+  }
+
+  .hdr__theme {
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    /* 44px, like every other tap target on the site. */
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    background: none;
+    border: 1px solid var(--line);
+    border-radius: var(--r-sm);
+    color: var(--ink-dim);
+    cursor: pointer;
+    transition: color 0.2s, border-color 0.2s, background 0.2s;
+  }
+  .hdr__theme:hover {
+    color: var(--accent);
+    border-color: var(--accent);
+    background: var(--lift-2);
+  }
+
+  /* Show the glyph for what the button DOES, not for the current theme: a moon
+     while light, a sun while dark. Both ship in the markup so switching needs
+     no DOM work.
+     :global() is required — the <svg> is rendered by Icon.astro, so it never
+     carries this component's data-astro-cid and a scoped rule would silently
+     not apply. */
+  .hdr__theme :global(.th-sun) { display: none; }
+
+  /* The no-attribute case, for a visitor with JavaScript off. */
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) .hdr__theme :global(.th-sun) { display: block; }
+    :root:not([data-theme="light"]) .hdr__theme :global(.th-moon) { display: none; }
+  }
+  /* Last, so an explicit choice beats the OS in both directions. */
+  :root[data-theme="dark"] .hdr__theme :global(.th-sun) { display: block; }
+  :root[data-theme="dark"] .hdr__theme :global(.th-moon) { display: none; }
+
+  @media (max-width: 700px) {
+    .hdr__right {
+      width: 100%;
+      justify-content: space-between;
+      gap: 0.75rem;
+    }
   }
 </style>

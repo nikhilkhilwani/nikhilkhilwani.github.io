@@ -43,6 +43,9 @@ import {
   parseParagraphBlocks, readTextBoxes,
 } from '../src/lib/docx/furniture.ts';
 import { reorderTokens } from '../src/lib/docx/bidi.ts';
+import {
+  splitNotes, markersIn, markerId, backReferenceId,
+} from '../src/lib/docx/footnotes.ts';
 import bidiFactory from 'bidi-js';
 import {
   twips, readParagraphProps, readPageSetup, correlate, paragraphText, normalizeText, withoutTables, readStyles,
@@ -2312,6 +2315,146 @@ eq(segmentByScript('  ')[0]?.script, LATIN, 'and it defaults to Latin');
   const box = pages[0].items.find((i) => i.kind === 'cellBox');
   const line = pages[0].items.find((i) => i.kind === 'line');
   ok(line.y >= box.y && line.y <= box.y + box.height, 'and the baseline stays inside the box');
+}
+
+
+/* -------------------------------------------------------------- footnotes */
+
+{
+  eq(markerId('#footnote-2'), '2', 'a marker link yields its id');
+  eq(markerId('#footnote-ref-2'), null, 'a back-link is not a marker');
+  eq(markerId('https://example.com'), null, 'an external link is not a marker');
+  eq(markerId(undefined), null, 'no link is not a marker');
+
+  eq(backReferenceId('#footnote-ref-2'), '2', 'a back-link yields its id');
+  eq(backReferenceId('#footnote-2'), null, 'a marker is not a back-link');
+}
+
+{
+  // mammoth appends the notes as an <ol> whose items link back to the marker.
+  // The anchors are the signal, not the position, so a document that merely
+  // ends with a list is left alone.
+  const blocks = parseBlocks(
+    '<p>Claim<sup><a href="#footnote-2" id="footnote-ref-2">[1]</a></sup> and more.</p>' +
+      '<p>Second<sup><a href="#footnote-3">[2]</a></sup>.</p>' +
+      '<ol><li><p>NOTEONE text. <a href="#footnote-ref-2">^</a></p></li>' +
+      '<li><p>NOTETWO text. <a href="#footnote-ref-3">^</a></p></li></ol>',
+  );
+
+  const split = splitNotes(blocks);
+  eq(split.notes.size, 2, 'both notes are separated out');
+  eq(split.body.length, 2, 'and the body keeps only its own paragraphs');
+  ok(
+    split.notes.get('2').runs.map((r) => r.text).join('').includes('NOTEONE'),
+    'note 2 carries its text',
+  );
+  ok(
+    !split.notes.get('2').runs.some((r) => backReferenceId(r.anchor) !== null),
+    'the back-link run is dropped — an arrow to an anchor is useless in print',
+  );
+  eq(split.notes.get('2').marker, '1.', 'the note keeps the number mammoth gave it');
+
+  // Markers are found on the body paragraphs.
+  deep(markersIn(split.body[0]), ['2'], 'the first paragraph references note 2');
+  deep(markersIn(split.body[1]), ['3'], 'the second references note 3');
+  deep(markersIn(split.notes.get('2')), [], 'a note references nothing itself');
+
+  // A plain list must not be mistaken for notes.
+  const plain = splitNotes(parseBlocks('<p>Text</p><ol><li><p>Just a list</p></li></ol>'));
+  eq(plain.notes.size, 0, 'an ordinary trailing list is not treated as footnotes');
+  eq(plain.body.length, 2, 'and stays in the body');
+}
+
+{
+  // An internal anchor must be recorded WITHOUT becoming a clickable link:
+  // nothing in a standalone PDF can follow it, but placement needs to see it.
+  const runs = parseBlocks('<p>Claim<a href="#footnote-2">[1]</a></p>')[0].runs;
+  const marker = runs.find((r) => r.text === '[1]');
+  eq(marker.anchor, '#footnote-2', 'the anchor is kept');
+  eq(marker.href, undefined, 'but it is not a followable link');
+
+  const external = parseBlocks('<p><a href="https://example.com">site</a></p>')[0].runs[0];
+  eq(external.href, 'https://example.com', 'a real destination is still a link');
+  eq(external.anchor, undefined, 'and carries no anchor');
+}
+
+{
+  // Per-page reserve: layout must be able to keep a different amount of room
+  // clear on each page, or every page would reserve room for every note.
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const many = Array.from({ length: 60 }, (_, i) => ({
+    kind: 'paragraph',
+    runs: [{ text: `Paragraph ${i + 1} with a reasonable number of words in it.` }],
+  }));
+
+  const flat = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure, insetBottom: 0 });
+  const firstOnly = layout(many, {
+    geometry: A4, scale: DEFAULT_SCALE, measure,
+    insetBottom: (index) => (index === 0 ? 200 : 0),
+  });
+
+  const linesOn = (pages, i) => pages[i].items.filter((it) => it.kind === 'line').length;
+  ok(
+    linesOn(firstOnly, 0) < linesOn(flat, 0),
+    `a reserve on page 1 shortens only page 1 (${linesOn(firstOnly, 0)} vs ${linesOn(flat, 0)})`,
+  );
+  ok(
+    linesOn(firstOnly, 1) >= linesOn(flat, 1) - 1,
+    'while page 2 keeps its full height',
+  );
+
+  const constant = layout(many, { geometry: A4, scale: DEFAULT_SCALE, measure, insetBottom: 200 });
+  ok(
+    linesOn(constant, 1) < linesOn(firstOnly, 1),
+    'a constant reserve shortens every page, unlike a per-page one',
+  );
+}
+
+/* ---------------------------------- table cells: indents and tab stops */
+
+{
+  const measure = (text, style) => text.length * style.size * 0.5;
+  const cell = (extra) => ({
+    kind: 'table',
+    rows: [[{ runs: [{ text: 'x' }], span: 1, ...extra }]],
+  });
+  const drawn = (block) => {
+    const pages = layout([block], { geometry: A4, scale: DEFAULT_SCALE, measure });
+    const item = pages[0].items.find((i) => i.kind === 'line');
+    return item.x + item.line.pieces[0].x;
+  };
+
+  const plain = drawn(cell({}));
+  ok(drawn(cell({ indent: 40 })) > plain + 35, 'a cell indent moves its text right');
+  ok(drawn(cell({ firstLine: 30 })) > plain + 25, 'a first-line indent moves the first line right');
+
+  // The indent must also NARROW the cell, not just shift the text: a shifted
+  // line with the old width would run out past the cell border.
+  const longCell = (extra) => ({
+    kind: 'table',
+    rows: [[{ runs: [{ text: 'word '.repeat(30).trim() }], span: 1, ...extra }]],
+  });
+  const linesIn = (block) => {
+    const pages = layout([block], { geometry: A4, scale: DEFAULT_SCALE, measure });
+    return pages[0].items.filter((i) => i.kind === 'line').length;
+  };
+  ok(
+    linesIn(longCell({ indent: 120 })) > linesIn(longCell({})),
+    `an indented cell wraps more (${linesIn(longCell({ indent: 120 }))} vs ${linesIn(longCell({}))})`,
+  );
+
+  {
+    // A tab stop inside a cell has to position text, not collapse to nothing.
+    const tabbedCell = {
+      kind: 'table',
+      rows: [[{ runs: [{ text: 'a	b' }], span: 1, tabs: [{ pos: 90, align: 'left' }] }]],
+    };
+    const tabbed = layout([tabbedCell], { geometry: A4, scale: DEFAULT_SCALE, measure });
+    const pieces = tabbed[0].items.find((i) => i.kind === 'line').line.pieces;
+    const after = pieces.find((piece) => piece.text === 'b');
+    ok(after !== undefined, 'the text after the tab survives');
+    ok(after.x >= 85, `and starts at the stop (${after.x.toFixed(1)})`);
+  }
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

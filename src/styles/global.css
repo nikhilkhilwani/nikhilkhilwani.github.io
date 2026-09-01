@@ -66,6 +66,86 @@
   --r-sm: 0px;
   --r-pill: 0px;
   --shell: 1120px;
+
+  /* Two things that are properties rather than colours but still have to flip
+     with the theme. Kept as tokens so the palette stays the single place a
+     theme is defined. If var() substitution ever failed here the declaration
+     is simply dropped, and the UA default is the light-correct value — so the
+     failure mode is safe rather than wrong. */
+  --smoothing: auto;
+  --grid-op: 0.45;
+
+  color-scheme: light;
+}
+
+/* ---------------------------------------------------------------------------
+   Blueprint Dark — the toggle's other half.
+   Same identity: Archivo 700, zero radius, mono labels, the same flat grid.
+   Only the VALUE flips. A toggle that also swapped the typeface would be two
+   different sites rather than two themes.
+
+   Three states, not two:
+     · explicit choice  -> data-theme="light" | "dark" on <html>
+     · system (default) -> no attribute, so only prefers-color-scheme separates
+   The :not([data-theme="light"]) guard is what lets an explicit light choice
+   win over a dark OS. The block is duplicated below for the explicit-dark
+   case because CSS cannot group a media query with a plain selector — THE TWO
+   MUST BE KEPT IN SYNC.
+
+   Three layers genuinely invert rather than just darken, which is why they are
+   tokens at all: --lift-1/2 go from near-opaque white (a light ground has no
+   headroom left to white) back to a whisper; --well flips from a dark tint to
+   a white one, because a progress track recedes by going lighter on dark and
+   darker on light; and the rules flip from dark-on-light to white-on-dark.
+   All 19 text pairs are checked against WCAG; the weakest is --ink-faint on
+   --surface-2 at 3.34.
+   --------------------------------------------------------------------------- */
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0e1319;
+    --surface: #161c24;
+    --surface-2: #1f2731;
+    --ink: #e6ecf3;
+    --ink-dim: #9aa7b4;
+    --ink-faint: #6b7885;
+    /* Brightened: #1d4ed8 is a 1.6:1 disaster on a dark ground. */
+    --accent-rgb: 110 168 254;
+    --accent-ink: #06122b;
+    --warn: #e8c46a;
+    --bad: #f08a82;
+    --good: #7fd398;
+    --line: rgba(255, 255, 255, 0.12);
+    --line-strong: rgba(255, 255, 255, 0.22);
+    --lift-1: rgba(255, 255, 255, 0.030);
+    --lift-2: rgba(255, 255, 255, 0.050);
+    --well: rgba(255, 255, 255, 0.090);
+    --smoothing: antialiased;
+    --grid-op: 0.7;
+    color-scheme: dark;
+  }
+}
+
+/* Keep in sync with the block above. */
+:root[data-theme="dark"] {
+  --bg: #0e1319;
+  --surface: #161c24;
+  --surface-2: #1f2731;
+  --ink: #e6ecf3;
+  --ink-dim: #9aa7b4;
+  --ink-faint: #6b7885;
+  --accent-rgb: 110 168 254;
+  --accent-ink: #06122b;
+  --warn: #e8c46a;
+  --bad: #f08a82;
+  --good: #7fd398;
+  --line: rgba(255, 255, 255, 0.12);
+  --line-strong: rgba(255, 255, 255, 0.22);
+  --lift-1: rgba(255, 255, 255, 0.030);
+  --lift-2: rgba(255, 255, 255, 0.050);
+  --well: rgba(255, 255, 255, 0.090);
+  --smoothing: antialiased;
+  --grid-op: 0.7;
+  color-scheme: dark;
 }
 
 * { box-sizing: border-box; }
@@ -80,10 +160,8 @@
 [hidden] { display: none !important; }
 
 html {
-  /* Never declared before. Native scrollbars, <select> popups and date pickers
-     take their chrome from this — on the old dark themes they rendered light
-     and wrong; now light is actually correct. */
-  color-scheme: light;
+  /* color-scheme is set per theme in the palette blocks above, so native
+     scrollbars, <select> popups and date pickers follow the toggle. */
   -webkit-text-size-adjust: 100%;
   scroll-behavior: smooth;
   /* The canvas is painted here as well as on body. Redundant by design: a
@@ -103,9 +181,9 @@ body {
   color: var(--ink);
   font-family: var(--sans);
   font-weight: 400;
-  /* No -webkit-font-smoothing: antialiased here. It thins strokes, which helps
-     light text on a dark ground and actively hurts dark text on a light one —
-     it was correct for every previous theme and is wrong for this one. */
+  /* Thinning strokes helps light-on-dark and hurts dark-on-light, so this has
+     to follow the theme rather than being set once. `auto` in light. */
+  -webkit-font-smoothing: var(--smoothing);
   display: grid;
   grid-template-rows: auto 1fr auto;
   overflow-x: hidden;

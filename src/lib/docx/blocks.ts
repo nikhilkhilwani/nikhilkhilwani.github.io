@@ -34,6 +34,12 @@ export interface Run {
   highlight?: string;
   /** Points, from a run's own w:sz. Overrides the paragraph size. */
   size?: number;
+  /**
+   * An in-document anchor such as `#footnote-2`. Kept separate from `href`
+   * because it must NOT become a clickable link — nothing in a standalone PDF
+   * can follow it — but footnote placement needs to know it is there.
+   */
+  anchor?: string;
 }
 
 export interface Cell {
@@ -50,6 +56,12 @@ export interface Cell {
   align?: 'left' | 'center' | 'right' | 'justify';
   spaceBefore?: number;
   spaceAfter?: number;
+  /** Left indent in points. */
+  indent?: number;
+  /** First-line offset; negative hangs. */
+  firstLine?: number;
+  /** Tab stops, measured from the cell's own left edge. */
+  tabs?: { pos: number; align: 'left' | 'center' | 'right' | 'decimal' }[];
 }
 
 export type Block =
@@ -136,7 +148,8 @@ const sameStyle = (a: Run, b: Run): boolean =>
   a.href === b.href &&
   a.color === b.color &&
   a.highlight === b.highlight &&
-  a.size === b.size;
+  a.size === b.size &&
+  a.anchor === b.anchor;
 
 /**
  * Merges adjacent runs with identical styling and drops empty ones.
@@ -233,6 +246,7 @@ export function parseBlocks(html: string): Block[] {
   let strike = 0;
   const scripts: ('super' | 'sub')[] = [];
   const hrefs: string[] = [];
+  const anchors: string[] = [];
   const listStack: { ordered: boolean; count: number }[] = [];
 
   let runs: Run[] = [];
@@ -256,6 +270,8 @@ export function parseBlocks(html: string): Block[] {
     // that must leave the run unlinked rather than carrying an empty target.
     const href = hrefs[hrefs.length - 1];
     if (href) run.href = href;
+    const anchor = anchors[anchors.length - 1];
+    if (anchor) run.anchor = anchor;
     if (cell) cell.push(run);
     else runs.push(run);
   };
@@ -328,12 +344,16 @@ export function parseBlocks(html: string): Block[] {
       case 'a': {
         if (tag.closing) {
           hrefs.pop();
+          anchors.pop();
         } else {
           const href = attr(tag.attrs, 'href');
           // Only real destinations; an internal bookmark cannot be followed
           // from a standalone PDF.
           if (href && /^(https?:|mailto:|tel:)/i.test(href)) hrefs.push(href);
           else hrefs.push('');
+          // The anchor is still recorded, unlinked, because footnote markers
+          // and their notes are identified by exactly these targets.
+          anchors.push(href && href.startsWith('#') ? href : '');
         }
         break;
       }
