@@ -151,8 +151,13 @@ const year = new Date().getFullYear();
        still promoted (translateZ(0) alone does NOT work), so the alpha has to
        stay. The 72% sits over the opaque .bg layer, so nothing outside the
        page can show through. Safe here because this header is not sticky, and
-       the animated blurred backdrop that caused the real repaint bug is gone. */
-    background: rgba(238, 241, 244, 0.72);
+       the animated blurred backdrop that caused the real repaint bug is gone.
+
+       The COLOUR must come from the theme, not a literal. It was hardcoded to
+       the light ground, so dark mode got a pale grey bar across the top of a
+       near-black page. --bg-rgb carries the triple precisely so the alpha above
+       can survive while the hue follows the theme. */
+    background: rgb(var(--bg-rgb) / 0.72);
     backdrop-filter: blur(10px);
   }
   .hdr__in {

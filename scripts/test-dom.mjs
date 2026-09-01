@@ -243,5 +243,64 @@ for (const htmlPath of htmlFiles.sort()) {
   );
 }
 
+/* --------------------------------------------------------------------------
+ * Theme-aware surfaces must not hold a hardcoded colour.
+ *
+ * The header shipped as `rgba(238, 241, 244, 0.72)` — the light ground, baked
+ * in — so dark mode drew a pale grey bar across a near-black page. The alpha
+ * has to stay (it is what keeps the nav text grayscale-antialiased), so the
+ * colour travels as an RGB triple that each theme block redefines. That only
+ * works if EVERY theme scope defines the triple: miss the [data-theme="dark"]
+ * one and the explicit toggle silently falls back to the light value.
+ * ------------------------------------------------------------------------ */
+
+const cssFiles = all.filter((f) => f.endsWith('.css'));
+const bundle = (await Promise.all(cssFiles.map((f) => readFile(f, 'utf8')))).join('\n');
+
+// The three scopes, in the order global.css declares them.
+const SCOPES = [
+  { label: 'the light default (bare :root)', re: /:root\{[^}]*\}/g, want: '238 241 244' },
+  { label: 'the dark media query', re: /@media[^{]*prefers-color-scheme:\s*dark[^{]*\{[\s\S]*?\n?\}\s*\}/g, want: '14 19 25' },
+  { label: 'the explicit dark toggle', re: /:root\[data-theme=("|')?dark\1?\]\{[^}]*\}/g, want: '14 19 25' },
+];
+
+for (const scope of SCOPES) {
+  const found = bundle.match(scope.re) ?? [];
+  const defines = found.some((chunk) => /--bg-rgb:\s*[\d\s]+/.test(chunk));
+  checks++;
+  if (!found.length) problem(`no CSS block matched ${scope.label}, so its theme tokens are unverified`);
+  else if (!defines) problem(`${scope.label} does not define --bg-rgb, so it inherits the wrong theme's ground`);
+}
+
+// And the header must consume the triple rather than a literal.
+const headerRule = bundle.match(/\.hdr(\[data-astro-cid-[^\]]*\])?\{[^}]*\}/);
+checks++;
+if (!headerRule) {
+  problem('the .hdr rule is missing from the built CSS');
+} else {
+  const rule = headerRule[0];
+  const background = rule.match(/background:\s*([^;}]+)/);
+  checks += 2;
+  if (!background) {
+    problem('the .hdr rule declares no background');
+  } else {
+    const value = background[1].trim();
+    if (!value.includes('var(--bg-rgb)')) {
+      problem(`.hdr background is "${value}" — it must tint var(--bg-rgb), not a literal colour, or one theme gets the other theme's bar`);
+    }
+    // The alpha is load-bearing for grayscale antialiasing; an opaque bar
+    // re-enables subpixel LCD text and the nav goes colour-fringed.
+    if (!/\/\s*0?\.\d+/.test(value)) {
+      problem(`.hdr background "${value}" has lost its alpha, which is what keeps the nav text grayscale-antialiased`);
+    }
+  }
+  checks++;
+  if (!/backdrop-filter:\s*blur/.test(rule)) {
+    problem('the .hdr rule has lost its backdrop-filter, which pairs with the alpha to keep text antialiasing grayscale');
+  }
+}
+
+console.log(`ok   theme tokens                  --bg-rgb defined in ${SCOPES.length} scopes · .hdr tints it`);
+
 console.log(`\n${checks} assertions, ${fail} failed`);
 process.exit(fail ? 1 : 0);

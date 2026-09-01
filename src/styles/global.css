@@ -9,7 +9,7 @@
      0.82 — the only class of change that actually lands.
      All 19 text pairs are checked against WCAG; the weakest is --ink-faint on
      --surface-2 at 3.62. */
-  --bg: #eef1f4;
+  --bg: rgb(var(--bg-rgb));
   --surface: #ffffff;
   --surface-2: #e2e7ec;
   --ink: #0b0f14;
@@ -34,6 +34,11 @@
      express. Without this the accent has to be hardcoded at every tint site,
      and re-theming leaves the old hue behind icon tiles and checked radios. */
   --accent-rgb: 29 78 216;
+
+  /* The page ground as a triple, for the same reason: the header tints it to
+     72% and needs the theme's own colour, not a hardcoded one. Hardcoding it
+     is exactly how the top bar ended up light grey in dark mode. */
+  --bg-rgb: 238 241 244;
 
   /* On a dark ground these were near-transparent white. On a near-white ground
      there is almost no headroom left to white, so the same alphas produced no
@@ -102,7 +107,7 @@
    --------------------------------------------------------------------------- */
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
-    --bg: #0e1319;
+    --bg: rgb(var(--bg-rgb));
     --surface: #161c24;
     --surface-2: #1f2731;
     --ink: #e6ecf3;
@@ -110,6 +115,7 @@
     --ink-faint: #6b7885;
     /* Brightened: #1d4ed8 is a 1.6:1 disaster on a dark ground. */
     --accent-rgb: 110 168 254;
+    --bg-rgb: 14 19 25;
     --accent-ink: #06122b;
     --warn: #e8c46a;
     --bad: #f08a82;
@@ -127,13 +133,14 @@
 
 /* Keep in sync with the block above. */
 :root[data-theme="dark"] {
-  --bg: #0e1319;
+  --bg: rgb(var(--bg-rgb));
   --surface: #161c24;
   --surface-2: #1f2731;
   --ink: #e6ecf3;
   --ink-dim: #9aa7b4;
   --ink-faint: #6b7885;
   --accent-rgb: 110 168 254;
+  --bg-rgb: 14 19 25;
   --accent-ink: #06122b;
   --warn: #e8c46a;
   --bad: #f08a82;
