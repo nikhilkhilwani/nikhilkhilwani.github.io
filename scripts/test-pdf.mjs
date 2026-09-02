@@ -29,6 +29,7 @@ import { zipSync, unzipSync, strToU8 } from 'fflate';
 import { docxToPdf as docxToPdfRaw, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
 import {
   toLines, toBlocks, bodySize, lineText, looksScanned, unmappedRatio,
+  furnitureFlags,
 } from '../src/lib/pdf/textitems.ts';
 import { buildDocx as buildDocxParts } from '../src/lib/docx/ooxml.ts';
 import mammothLib from 'mammoth';
@@ -2033,6 +2034,165 @@ const plain = await makePlain();
   eq((html.match(/<li>/g) ?? []).length, 4, 'all four list items survive as list items');
   ok(/deliberately long enough/.test(html), 'and the long paragraph survives whole');
   ok(/A closing paragraph after the table\./.test(html), 'along with the text after the table');
+}
+
+/* ---------------- 17. pdf to word: running headers and footers */
+
+/**
+ * A real five-page PDF with a header and a numbered footer, read back.
+ *
+ * The pure tests in test-tools.mjs use synthetic geometry. This one proves the
+ * whole path: that the furniture genuinely lands in the top and bottom bands of
+ * a PDF produced by a real layout engine, that a footer whose page number
+ * changes is still recognised, and — the case that actually broke — that
+ * ordinary body text is NOT taken with it.
+ */
+{
+  const WNS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const HEADER = 'Acme Corporation - Internal';
+  const para = (text) => `<w:p><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+
+  // The filler repeats itself on purpose. Blanking digits before comparing —
+  // which a footer reading "Page 3 of 12" requires — makes "Paragraph 1 of the
+  // body" and "Paragraph 12 of the body" identical, and both land in the top
+  // band. This fixture is the adversarial case for that.
+  const filler = [];
+  for (let i = 1; i <= 45; i++) {
+    filler.push(
+      para(
+        `Paragraph ${i} of the body. ` +
+          'It exists to push the document onto more than one page so that the running '.repeat(4) +
+          'header and footer have something to repeat across.',
+      ),
+    );
+  }
+
+  const sectPr =
+    '<w:sectPr>' +
+    '<w:headerReference w:type="default" r:id="rId10"/>' +
+    '<w:footerReference w:type="default" r:id="rId11"/>' +
+    '<w:pgSz w:w="11906" w:h="16838"/>' +
+    '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="567" w:footer="567"/>' +
+    '</w:sectPr>';
+
+  const furnished = zipSync({
+    '[Content_Types].xml': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+        '<Override PartName="/word/header1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.header+xml"/>' +
+        '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>' +
+        '</Types>',
+    ),
+    '_rels/.rels': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+        '</Relationships>',
+    ),
+    'word/document.xml': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        `<w:document ${WNS} xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">` +
+        `<w:body>${filler.join('')}${sectPr}</w:body></w:document>`,
+    ),
+    'word/_rels/document.xml.rels': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId10" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/header" Target="header1.xml"/>' +
+        '<Relationship Id="rId11" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>' +
+        '</Relationships>',
+    ),
+    'word/header1.xml': strToU8(
+      `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><w:hdr ${WNS}>${para(HEADER)}</w:hdr>`,
+    ),
+    'word/footer1.xml': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        `<w:ftr ${WNS}><w:p>` +
+        '<w:r><w:t xml:space="preserve">Confidential | Page </w:t></w:r>' +
+        '<w:fldSimple w:instr=" PAGE "><w:r><w:t>1</w:t></w:r></w:fldSimple>' +
+        '</w:p></w:ftr>',
+    ),
+  });
+
+  const built = await docxToPdf(furnished);
+  const furnishedPdf = built.bytes ?? built;
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(furnishedPdf),
+    isEvalSupported: false,
+  }).promise;
+  ok(doc.numPages >= 4, `the fixture spans several pages (${doc.numPages})`);
+
+  const scans = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    const viewport = page.getViewport({ scale: 1 });
+    const content = await page.getTextContent();
+    const items = [];
+    for (const item of content.items) {
+      if (typeof item.str !== 'string' || !item.transform) continue;
+      const t = item.transform;
+      items.push({
+        text: item.str,
+        x: t[4],
+        y: t[5],
+        width: item.width ?? 0,
+        size: Math.hypot(t[0], t[1]) || item.height || 11,
+        font: item.fontName ?? '',
+        eol: item.hasEOL === true,
+      });
+    }
+    scans.push({ lines: toLines(items), height: viewport.height });
+  }
+
+  const flags = furnitureFlags(scans);
+  const dropped = [];
+  const kept = [];
+  scans.forEach((scan, index) => {
+    scan.lines.forEach((line, i) => {
+      (flags[index][i] ? dropped : kept).push(lineText(line));
+    });
+  });
+
+  eq(
+    dropped.filter((text) => text.includes('Acme Corporation')).length,
+    doc.numPages,
+    'the running header is dropped from every page',
+  );
+  eq(
+    dropped.filter((text) => /Confidential/.test(text)).length,
+    doc.numPages,
+    'and so is the footer, even though its page number changes',
+  );
+  ok(
+    new Set(dropped.filter((text) => /Confidential/.test(text))).size > 1,
+    'the footers really were different strings, so blanking the digits mattered',
+  );
+  eq(dropped.length, doc.numPages * 2, 'and nothing else was taken');
+
+  ok(!kept.some((text) => text.includes('Acme Corporation')), 'no copy of the header survives');
+  ok(!kept.some((text) => /Confidential/.test(text)), 'nor of the footer');
+  eq(
+    kept.filter((text) => /Paragraph \d+ of the body/.test(text)).length,
+    45,
+    'while every one of the 45 body paragraphs survives',
+  );
+
+  const cleaned = scans
+    .flatMap((scan, index) => toBlocks(scan.lines.filter((_, i) => !flags[index][i])))
+    .map((block) => (block.spans ?? []).map((span) => span.text).join(''))
+    .join('\n');
+  ok(!/Acme Corporation/.test(cleaned), 'the converted document never mentions the header');
+  ok(/Paragraph 1 of the body/.test(cleaned), 'and holds the body from the first paragraph');
+  ok(/Paragraph 45 of the body/.test(cleaned), 'to the last');
+
+  // Keeping the furniture must really keep it.
+  const whole = scans
+    .flatMap((scan) => toBlocks(scan.lines))
+    .map((block) => (block.spans ?? []).map((span) => span.text).join(''))
+    .join('\n');
+  ok(/Acme Corporation/.test(whole), 'keeping headers and footers keeps them');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

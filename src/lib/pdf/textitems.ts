@@ -49,6 +49,9 @@ export interface Span {
   italic: boolean;
   mono: boolean;
   size: number;
+  /** The typeface family, without its weight or slope. Optional so that spans
+   *  synthesised by callers need not invent one. */
+  family?: string;
   /** Left edge in PDF user space. Table columns are recovered from this, so it
    *  is measured rather than estimated from character counts. */
   x: number;
@@ -72,6 +75,8 @@ export interface Block {
   kind: BlockKind;
   /** 1-3 for headings. */
   level?: number;
+  /** Nesting depth of a list item, 0 for the outermost. */
+  depth?: number;
   /** For list items. */
   marker?: 'bullet' | 'number';
   /** Content of a heading, paragraph or list item. */
@@ -108,6 +113,76 @@ export function styleOf(fontName: string): { bold: boolean; italic: boolean; mon
   };
 }
 
+/** Words in a font name that describe the weight or slope, not the family. */
+const FACE_WORDS =
+  /^(regular|book|roman|italic|oblique|bold|black|heavy|semibold|demibold|demi|light|thin|extralight|ultralight|medium|condensed|narrow|expanded|mt|ps|psmt|it|ital|bd|bi|blk|rg|obl)$/i;
+
+/**
+ * The base-14 PDF fonts, mapped to families a reader actually has.
+ *
+ * "Helvetica" and "Times" are PostScript names present on almost no Windows
+ * machine; Arial and Times New Roman are their metric-compatible equivalents,
+ * which is the substitution Word and LibreOffice both make anyway. Naming them
+ * outright means the document looks as intended instead of depending on
+ * whatever fallback the reader happens to choose.
+ */
+const FAMILY_ALIASES: Record<string, string> = {
+  helvetica: 'Arial',
+  arial: 'Arial',
+  times: 'Times New Roman',
+  timesnewroman: 'Times New Roman',
+  courier: 'Courier New',
+  couriernew: 'Courier New',
+  symbol: 'Symbol',
+  zapfdingbats: 'Wingdings',
+};
+
+/** Face descriptions glued onto a family with no separator. */
+const GLUED_FACE =
+  /^(.+?)(BoldItalic|BoldOblique|Regular|Italic|Oblique|Bold|Black|Heavy|SemiBold|DemiBold|Light|Thin|Medium|PSMT|MT|PS)$/;
+
+/**
+ * The typeface family behind a PDF font name.
+ *
+ * Without this, every converted document came out in a single font whatever the
+ * PDF used: the weight was read off the name and the family then discarded.
+ *
+ * Names arrive in several shapes and often several at once — a subset prefix
+ * ("ABCDEF+"), pdf.js's uniquifying suffix ("-8774"), and the face description
+ * attached with a hyphen ("Carlito-Bold"), a comma ("Arial,Bold") or nothing at
+ * all ("TimesNewRomanPSMT").
+ */
+export function familyOf(fontName: string): string {
+  let name = fontName.replace(/^[A-Z]{6}\+/, '').replace(/-\d+$/, '').split(',')[0];
+
+  // Peel face words off the end until nothing more comes away. The loop stops
+  // because every branch shortens the name.
+  for (let guard = 0; guard < 8; guard++) {
+    const before = name;
+    name = name.replace(/[-_ ]+$/, '');
+
+    const parts = name.split(/[-_ ]/);
+    if (parts.length > 1 && FACE_WORDS.test(parts[parts.length - 1])) {
+      name = parts.slice(0, -1).join('-');
+    } else {
+      const glued = GLUED_FACE.exec(name);
+      // Keep at least three characters, so "MT" alone does not eat the name.
+      if (glued && glued[1].length >= 3) name = glued[1];
+    }
+
+    if (name === before) break;
+  }
+
+  // The alias table covers the run-together PostScript names that matter --
+  // "TimesNewRomanPSMT" and the rest -- so no attempt is made to split
+  // camelCase generally. Guessing a word boundary turns "JetBrainsMono", which
+  // a reader may have installed, into "Jet Brains Mono", which nobody has.
+  const alias = FAMILY_ALIASES[name.replace(/[-_ ]/g, '').toLowerCase()];
+  if (alias) return alias;
+
+  return name.replace(/[-_]+/g, ' ').trim() || fontName;
+}
+
 /* -------------------------------------------------------------------------- */
 /* Items to lines                                                             */
 /* -------------------------------------------------------------------------- */
@@ -126,7 +201,12 @@ const SPACE_RATIO = 0.22;
 const GAP_RATIO = 0.8;
 
 const sameStyle = (a: Span, b: Span) =>
-  a.bold === b.bold && a.italic === b.italic && a.mono === b.mono && Math.abs(a.size - b.size) < 0.6;
+  a.bold === b.bold &&
+  a.italic === b.italic &&
+  a.mono === b.mono &&
+  // Two families must not fuse into one run, or the second loses its typeface.
+  a.family === b.family &&
+  Math.abs(a.size - b.size) < 0.6;
 
 /** A span that exists only to move across the page. */
 export const isGap = (span: Span): boolean =>
@@ -207,6 +287,7 @@ export function toLines(items: RawItem[]): Line[] {
         size: item.size,
         x: item.x,
         width: item.width,
+        family: familyOf(item.font),
       };
 
       const tail = spans[spans.length - 1];
@@ -417,6 +498,8 @@ interface ColumnRun {
   from: number;
   to: number;
   columns: number[];
+  /** Indices of lines that continue the row above rather than starting one. */
+  continuations: number[];
 }
 
 /**
@@ -443,21 +526,48 @@ export function findTableRuns(lines: Line[]): ColumnRun[] {
     }
     let j = i + 1;
     let shared = starts[i];
-    while (j < lines.length && starts[j].length >= 2) {
-      const next = intersect(shared, starts[j]);
-      if (next.length < 2) break;
-      shared = next;
-      j++;
+    const continuations: number[] = [];
+
+    while (j < lines.length) {
+      if (starts[j].length >= 2) {
+        const next = intersect(shared, starts[j]);
+        if (next.length < 2) break;
+        shared = next;
+        j++;
+        continue;
+      }
+      // A cell whose text wrapped puts content in ONE column, which used to
+      // end the run and turn the rest of the table into paragraphs. Absorbing
+      // it keeps the table whole; toBlocks then folds it into the row above
+      // instead of inventing a row for it.
+      if (continuesRow(lines[j], lines[j - 1], shared)) {
+        continuations.push(j);
+        j++;
+        continue;
+      }
+      break;
     }
-    // A single line with wide gaps is not a table.
-    if (j - i >= 2) {
-      runs.push({ from: i, to: j - 1, columns: shared });
+
+    // Two real rows are the minimum. Counting continuations here would let a
+    // two-line paragraph with one wide gap pass as a table.
+    if (j - i - continuations.length >= 2) {
+      runs.push({ from: i, to: j - 1, columns: shared, continuations });
       i = j;
     } else {
       i++;
     }
   }
   return runs;
+}
+
+/** Whether a line carries the overflow of the row above it. */
+function continuesRow(line: Line, previous: Line, columns: number[]): boolean {
+  if (isListLine(line)) return false;
+  const gap = previous.y - line.y;
+  // Wrap spacing, not paragraph spacing.
+  if (gap <= 0 || gap > line.size * WRAP_LEADING) return false;
+  // And it must begin at one of the table's own columns.
+  return columns.some((column) => Math.abs(line.x - column) <= COLUMN_TOLERANCE);
 }
 
 /**
@@ -500,6 +610,19 @@ function splitAtColumns(line: Line, columns: number[]): Span[][] {
   return cells.map((cell) => proseSpans(cell));
 }
 
+/** Folds a continuation line's cells into the row it belongs to. */
+function mergeCells(row: Span[][], extra: Span[][]): void {
+  for (let column = 0; column < extra.length; column++) {
+    const addition = extra[column];
+    if (!addition?.length) continue;
+    const cell = (row[column] ??= []);
+    const tail = cell[cell.length - 1];
+    if (tail && !/\s$/.test(tail.text)) tail.text += ' ';
+    for (const span of addition) cell.push({ ...span });
+    row[column] = proseSpans(cell);
+  }
+}
+
 export interface BlockOptions {
   /** Overrides the measured body size, for testing. */
   bodySize?: number;
@@ -540,7 +663,14 @@ export function toBlocks(lines: Line[], options: BlockOptions = {}): Block[] {
     if (run && run.from === i) {
       close();
       const rows: Span[][][] = [];
-      for (let r = run.from; r <= run.to; r++) rows.push(splitAtColumns(lines[r], run.columns));
+      for (let r = run.from; r <= run.to; r++) {
+        const cells = splitAtColumns(lines[r], run.columns);
+        if (run.continuations.includes(r) && rows.length) {
+          mergeCells(rows[rows.length - 1], cells);
+        } else {
+          rows.push(cells);
+        }
+      }
       blocks.push({ kind: 'table', rows });
       continue;
     }
@@ -600,7 +730,44 @@ export function toBlocks(lines: Line[], options: BlockOptions = {}): Block[] {
     open = { block, line };
   }
 
+  // Depths can only be assigned once every list item is known.
+  assignListDepths(blocks);
   return blocks;
+}
+
+/** Indents closer together than this are the same nesting level. */
+const TIER_TOLERANCE = 6;
+/** The numbering definitions written by the .docx writer go three deep. */
+const MAX_DEPTH = 2;
+
+/**
+ * Turns list indents into nesting levels.
+ *
+ * A depth means nothing on its own: 36pt is the outer level in one document and
+ * the second level in another. So the distinct indents actually used are
+ * collected, sorted and banded, and a level is a position in that list rather
+ * than a comparison against any fixed measurement.
+ */
+export function assignListDepths(blocks: Block[]): void {
+  const indents = blocks
+    .filter((block) => block.kind === 'list')
+    .map((block) => block.indent ?? 0);
+  if (!indents.length) return;
+
+  const tiers: number[] = [];
+  for (const indent of [...indents].sort((a, b) => a - b)) {
+    if (!tiers.length || indent - tiers[tiers.length - 1] > TIER_TOLERANCE) tiers.push(indent);
+  }
+
+  for (const block of blocks) {
+    if (block.kind !== 'list') continue;
+    const indent = block.indent ?? 0;
+    let depth = 0;
+    for (let i = 0; i < tiers.length; i++) {
+      if (indent >= tiers[i] - TIER_TOLERANCE) depth = i;
+    }
+    block.depth = Math.min(depth, MAX_DEPTH);
+  }
 }
 
 /** How many times bigger than body text a line has to be to be a heading. */
@@ -647,6 +814,122 @@ function continues(previous: Line, line: Line, body: number, rightEdge: number):
   if (columnWidth > 0 && (previous.right - previous.x) / columnWidth < SHORT_LINE) return false;
 
   return true;
+}
+
+/* -------------------------------------------------------------------------- */
+/* Page furniture                                                             */
+/* -------------------------------------------------------------------------- */
+
+/** How much of the top and bottom of a page can hold furniture. */
+const FURNITURE_ZONE = 0.12;
+/** Furniture has to repeat on at least this share of the pages. */
+const FURNITURE_SHARE = 0.6;
+/**
+ * The widest a furniture line may be, as a share of the widest line on its
+ * page.
+ *
+ * This is what stops the digit-blanking below from eating the document. A
+ * running footer reads "Page 3 of 12" and has to match "Page 4 of 12", so the
+ * numbers are blanked before the texts are compared — which also makes
+ * "Paragraph 1 of the body..." and "Paragraph 12 of the body..." identical. A
+ * wrapped body line runs to the right margin; a running header is a short
+ * label. Measured on a real conversion: header 29% of the column, footer 23%,
+ * body lines 98%.
+ */
+const FURNITURE_WIDTH = 0.7;
+/** Furniture sits at the same height on every page; body text does not. */
+const FURNITURE_DRIFT = 2.5;
+
+export interface PageLines {
+  lines: Line[];
+  /** Page height in points, so the top and bottom zones can be measured. */
+  height: number;
+}
+
+/**
+ * A line's text with its numbers blanked, so that "Page 3 of 12" and
+ * "Page 4 of 12" count as the same running footer.
+ */
+function furnitureKey(line: Line): string {
+  return lineText(line)
+    .trim()
+    .replace(/\d+/g, '#')
+    .replace(/\s+/g, ' ')
+    .toLowerCase();
+}
+
+/**
+ * Marks the lines that are page furniture rather than content.
+ *
+ * A running header or footer is drawn on every page, and a converter that
+ * treats it as body text produces a document with "Confidential — Page 3 of
+ * 12" wedged between paragraphs a dozen times over. Nothing in the PDF says
+ * which lines those are; what gives them away is that the same text keeps
+ * appearing in the same band at the top or bottom of the page.
+ *
+ * Repetition is the whole test, so a single-page document never loses
+ * anything: the threshold below is at least two pages, and one page cannot
+ * reach it. That is deliberately the only thing protecting it — an extra
+ * length guard here would be unreachable, and unreachable defence reads as
+ * though it were doing something.
+ */
+export function furnitureFlags(pages: PageLines[]): boolean[][] {
+  const none = () => pages.map((page) => page.lines.map(() => false));
+
+  const zoneOf = (line: Line, height: number): string | null => {
+    if (height <= 0) return null;
+    if (line.y > height * (1 - FURNITURE_ZONE)) return 'top';
+    if (line.y < height * FURNITURE_ZONE) return 'bottom';
+    return null;
+  };
+
+  // A line is only a candidate if it is short for its page. Widths are
+  // compared against the widest line actually present rather than the page
+  // size, because the text column may be much narrower than the paper.
+  const widest = pages.map((page) =>
+    page.lines.reduce((most, line) => Math.max(most, line.right - line.x), 0),
+  );
+
+  const candidateKey = (line: Line, page: PageLines, index: number): string | null => {
+    const zone = zoneOf(line, page.height);
+    if (!zone) return null;
+    const column = widest[index];
+    if (column > 0 && (line.right - line.x) / column > FURNITURE_WIDTH) return null;
+    const text = furnitureKey(line);
+    return text ? zone + '|' + text : null;
+  };
+
+  const seen = new Map<string, { pages: Set<number>; heights: number[] }>();
+  pages.forEach((page, index) => {
+    for (const line of page.lines) {
+      const key = candidateKey(line, page, index);
+      if (!key) continue;
+      const entry = seen.get(key) ?? { pages: new Set<number>(), heights: [] };
+      entry.pages.add(index);
+      entry.heights.push(line.y);
+      seen.set(key, entry);
+    }
+  });
+
+  const threshold = Math.max(2, Math.ceil(pages.length * FURNITURE_SHARE));
+  const furniture = new Set<string>();
+  for (const [key, entry] of seen) {
+    if (entry.pages.size < threshold) continue;
+    // And it has to sit at the same height each time. Body text that repeats
+    // by coincidence drifts down the page; a header does not move.
+    const lowest = Math.min(...entry.heights);
+    const highest = Math.max(...entry.heights);
+    if (highest - lowest > FURNITURE_DRIFT) continue;
+    furniture.add(key);
+  }
+  if (!furniture.size) return none();
+
+  return pages.map((page, index) =>
+    page.lines.map((line) => {
+      const key = candidateKey(line, page, index);
+      return key ? furniture.has(key) : false;
+    }),
+  );
 }
 
 /* -------------------------------------------------------------------------- */

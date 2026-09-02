@@ -85,7 +85,13 @@ export function runXml(span: Span, _font?: string): string {
   // Word tolerates a wrong order, LibreOffice mostly does, and a strict
   // validator rejects the file outright -- so it is worth getting right.
   const properties: string[] = [];
-  if (span.mono) properties.push('<w:rFonts w:ascii="Courier New" w:hAnsi="Courier New"/>');
+  // The PDF's own family, when it could be recovered. Falling back to the
+  // document default is what made every conversion arrive in one typeface.
+  const family = span.family || (span.mono ? 'Courier New' : '');
+  if (family) {
+    const safe = escapeXml(family);
+    properties.push(`<w:rFonts w:ascii="${safe}" w:hAnsi="${safe}" w:cs="${safe}"/>`);
+  }
   if (span.bold) properties.push('<w:b/>');
   if (span.italic) properties.push('<w:i/>');
   properties.push(`<w:sz w:val="${halfPoints(span.size)}"/>`);
@@ -114,7 +120,8 @@ function paragraphXml(block: Block, font?: string): string {
   if (block.kind === 'list') {
     // numId 1 is the bullet definition, 2 the decimal one; see numberingXml.
     const numId = block.marker === 'number' ? 2 : 1;
-    properties.push(`<w:numPr><w:ilvl w:val="0"/><w:numId w:val="${numId}"/></w:numPr>`);
+    const depth = Math.min(2, Math.max(0, block.depth ?? 0));
+    properties.push(`<w:numPr><w:ilvl w:val="${depth}"/><w:numId w:val="${numId}"/></w:numPr>`);
   } else if (block.indent && block.indent > 2) {
     properties.push(`<w:ind w:left="${twips(block.indent)}"/>`);
   }
@@ -359,18 +366,33 @@ function stylesXml(options: Required<DocxOptions>): string {
  * paragraphs with no marker at all.
  */
 function numberingXml(): string {
-  const level = (format: string, text: string, symbol?: string) =>
-    '<w:lvl w:ilvl="0"><w:start w:val="1"/>' +
-    `<w:numFmt w:val="${format}"/><w:lvlText w:val="${text}"/><w:lvlJc w:val="left"/>` +
-    '<w:pPr><w:ind w:left="720" w:hanging="360"/></w:pPr>' +
+  // Word takes the bullet glyph and the numbering format per LEVEL. A
+  // definition holding only ilvl 0 leaves every nested item unmarked, so all
+  // three levels are declared even though most documents use one.
+  const BULLETS = ['\u2022', 'o', '\u25aa'];
+  const NUMBERS: [string, string][] = [
+    ['decimal', '%1.'],
+    ['lowerLetter', '%2.'],
+    ['lowerRoman', '%3.'],
+  ];
+
+  const level = (ilvl: number, format: string, text: string, symbol?: string) =>
+    `<w:lvl w:ilvl="${ilvl}"><w:start w:val="1"/>` +
+    `<w:numFmt w:val="${format}"/><w:lvlText w:val="${escapeXml(text)}"/><w:lvlJc w:val="left"/>` +
+    `<w:pPr><w:ind w:left="${720 * (ilvl + 1)}" w:hanging="360"/></w:pPr>` +
     (symbol ? `<w:rPr><w:rFonts w:ascii="${symbol}" w:hAnsi="${symbol}" w:hint="default"/></w:rPr>` : '') +
     '</w:lvl>';
+
+  const bullets = BULLETS.map((glyph, ilvl) =>
+    level(ilvl, 'bullet', glyph, ilvl === 1 ? 'Courier New' : 'Symbol'),
+  ).join('');
+  const numbers = NUMBERS.map(([format, text], ilvl) => level(ilvl, format, text)).join('');
 
   return (
     '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
     '<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">' +
-    `<w:abstractNum w:abstractNumId="0">${level('bullet', '', 'Symbol')}</w:abstractNum>` +
-    `<w:abstractNum w:abstractNumId="1">${level('decimal', '%1.')}</w:abstractNum>` +
+    `<w:abstractNum w:abstractNumId="0">${bullets}</w:abstractNum>` +
+    `<w:abstractNum w:abstractNumId="1">${numbers}</w:abstractNum>` +
     '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>' +
     '<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>' +
     '</w:numbering>'

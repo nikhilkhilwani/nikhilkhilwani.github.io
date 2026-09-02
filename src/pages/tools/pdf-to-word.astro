@@ -37,6 +37,16 @@ import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
             <small>Start a new Word page wherever the PDF started one.</small>
           </span>
         </label>
+        <label class="pw__switch">
+          <input type="checkbox" id="pw-opt-furniture" />
+          <span>
+            <strong>Keep headers and footers</strong>
+            <small>
+              Off by default: a running header repeats on every page and lands between
+              the paragraphs. Turn it on to keep them as ordinary text.
+            </small>
+          </span>
+        </label>
       </div>
 
       <div class="pw__actions">
@@ -153,6 +163,14 @@ import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
     padding-left: 0.6rem;
     border-left: 2px solid var(--warn);
   }
+  /* Something the tool did on purpose, not something wrong with the file. */
+  .pw__aside {
+    margin: 0;
+    font-size: 0.83rem;
+    color: var(--ink-dim);
+    padding-left: 0.6rem;
+    border-left: 2px solid var(--line-strong);
+  }
   .pw__bad {
     margin: 0;
     font-size: 0.88rem;
@@ -181,7 +199,9 @@ import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
   import { formatBytes, stemOf, withExtension } from '../../lib/ui/files.ts';
   import { downloadBlob, blobBytes } from '../../lib/ui/download.ts';
   import { LIMITS, formatLimit } from '../../lib/ui/limits.ts';
-  import { pdfToWord, describeConversion, looksLikePdf } from '../../lib/pdf/toword.ts';
+  import {
+    pdfToWord, describeConversion, describeFurniture, looksLikePdf,
+  } from '../../lib/pdf/toword.ts';
   import type { ConvertResult } from '../../lib/pdf/toword.ts';
   import { PasswordRequired } from '../../lib/pdf/pdfjs.ts';
 
@@ -194,6 +214,7 @@ import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
   const clearBtn = $<HTMLButtonElement>('pw-clear');
   const optTables = $<HTMLInputElement>('pw-opt-tables');
   const optBreaks = $<HTMLInputElement>('pw-opt-breaks');
+  const optFurniture = $<HTMLInputElement>('pw-opt-furniture');
 
   let file: File | null = null;
   let bytes: Uint8Array | null = null;
@@ -255,6 +276,10 @@ import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
     }
     if (stats.childElementCount) card.append(stats);
 
+    // What was left out, stated rather than silently done.
+    const furniture = describeFurniture(result);
+    if (furniture) card.append(el('p', 'pw__aside', furniture));
+
     for (const warning of result.warnings) {
       card.append(el('p', 'pw__warn', warning));
     }
@@ -309,6 +334,7 @@ import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
         password,
         tables: optTables.checked,
         pageBreaks: optBreaks.checked,
+        keepFurniture: optFurniture.checked,
         onProgress: (page, total) => {
           note.textContent = `Reading page ${page} of ${total}…`;
         },
@@ -353,7 +379,7 @@ import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
   clearBtn.addEventListener('click', reset);
 
   // A different setting means a different document, so the old result goes.
-  for (const input of [optTables, optBreaks]) {
+  for (const input of [optTables, optBreaks, optFurniture]) {
     input.addEventListener('change', () => {
       if (out.childElementCount) out.replaceChildren();
     });

@@ -22,6 +22,7 @@
 
 import { loadPdfjs, openPdf } from './pdfjs.ts';
 import {
+  furnitureFlags,
   looksMultiColumn,
   looksScanned,
   toBlocks,
@@ -42,6 +43,8 @@ export interface ConvertOptions {
   tables?: boolean;
   /** Insert an explicit page break between PDF pages. */
   pageBreaks?: boolean;
+  /** Keep running headers and footers as body text instead of dropping them. */
+  keepFurniture?: boolean;
   /** Called after each page so the UI can show progress. */
   onProgress?: (page: number, total: number) => void;
 }
@@ -61,6 +64,8 @@ export interface ConvertResult {
   pages: PageReport[];
   /** Counts by block kind, for the summary. */
   counts: Record<string, number>;
+  /** How many repeated header and footer lines were left out. */
+  furnitureDropped: number;
   /** Things the visitor needs to know about this particular file. */
   warnings: string[];
   /** True when no page had a usable text layer. */
@@ -196,6 +201,19 @@ export async function pdfToWord(
   let dominant = 11;
   const sizes: number[] = [];
 
+  // Two passes are unavoidable: a running header is only recognisable once
+  // every page has been read, because repetition is the only thing that
+  // distinguishes it from an ordinary line of text.
+  interface Scanned {
+    number: number;
+    lines: ReturnType<typeof toLines>;
+    height: number;
+    scanned: boolean;
+    multiColumn: boolean;
+    unreadable: number;
+  }
+  const scans: Scanned[] = [];
+
   for (let number = 1; number <= doc.numPages; number++) {
     const page = await doc.getPage(number);
     const viewport = page.getViewport({ scale: 1 });
@@ -210,39 +228,55 @@ export async function pdfToWord(
     const images = await imageCount(page as never, pdfjs.OPS as never);
 
     const lines = toLines(items);
-    const scanned = looksScanned(items, images);
-    const multiColumn = looksMultiColumn(lines, viewport.width);
-    const unreadable = unmappedRatio(items);
-
     if (lines.length) {
       sizes.push(bodySize(lines));
       // The left margin of the first page stands in for the document's.
       if (number === 1) margin = Math.min(...lines.map((line) => line.x));
     }
 
-    const pageBlocks = lines.length ? toBlocks(lines) : [];
+    scans.push({
+      number,
+      lines,
+      height: viewport.height,
+      scanned: looksScanned(items, images),
+      multiColumn: looksMultiColumn(lines, viewport.width),
+      unreadable: unmappedRatio(items),
+    });
+
+    options.onProgress?.(number, doc.numPages);
+    page.cleanup();
+  }
+
+  const flags =
+    options.keepFurniture === true
+      ? scans.map((scan) => scan.lines.map(() => false))
+      : furnitureFlags(scans.map((scan) => ({ lines: scan.lines, height: scan.height })));
+
+  let furnitureDropped = 0;
+  for (const [index, scan] of scans.entries()) {
+    const keep = scan.lines.filter((_, i) => !flags[index]?.[i]);
+    furnitureDropped += scan.lines.length - keep.length;
+
+    const pageBlocks = keep.length ? toBlocks(keep) : [];
     if (options.tables === false) {
       for (const block of pageBlocks) {
         if (block.kind === 'table') flattenTable(block);
       }
     }
 
-    if (options.pageBreaks !== false && number > 1 && blocks.length) {
+    if (options.pageBreaks !== false && scan.number > 1 && blocks.length) {
       blocks.push({ kind: 'pagebreak' });
     }
     blocks.push(...pageBlocks);
 
     pages.push({
-      page: number,
-      lines: lines.length,
+      page: scan.number,
+      lines: scan.lines.length,
       blocks: pageBlocks.length,
-      scanned,
-      multiColumn,
-      unreadableRatio: unreadable,
+      scanned: scan.scanned,
+      multiColumn: scan.multiColumn,
+      unreadableRatio: scan.unreadable,
     });
-
-    options.onProgress?.(number, doc.numPages);
-    page.cleanup();
   }
 
   if (sizes.length) {
@@ -290,7 +324,7 @@ export async function pdfToWord(
   // cleanup() is the documented way to release a document's resources.
   doc.cleanup();
 
-  return { bytes, pages, counts, warnings, empty: withText === 0 };
+  return { bytes, pages, counts, warnings, furnitureDropped, empty: withText === 0 };
 }
 
 /** Turns a table back into plain paragraphs, one row per line. */
@@ -351,10 +385,17 @@ export function describeConversion(result: ConvertResult): string {
  * A PDF records where ink went, not what the author meant, so everything here
  * is a limit of the format rather than of the effort spent on it.
  */
+/** A note about the furniture that was left out, when any was. */
+export function describeFurniture(result: ConvertResult): string {
+  if (!result.furnitureDropped) return '';
+  const lines = result.furnitureDropped;
+  return `Left out ${lines} repeated header or footer line${lines === 1 ? '' : 's'}, which would otherwise appear between the paragraphs on every page.`;
+}
+
 export const CONVERT_CAVEATS = [
   'A scanned PDF has no text to extract — it needs OCR, which this tool does not do',
   'Paragraphs, headings, lists and tables are inferred from spacing and alignment, because a PDF records none of them',
   'Borderless tables and side-by-side columns are the two layouts most likely to come out wrong',
-  'Exact page positions, headers, footers and footnotes are not reproduced; the text is rebuilt as a flowing document',
+  'Running headers and footers are detected by repetition and left out, rather than reproduced as real Word headers',
   'Colours, highlighting and text boxes are not carried over',
 ] as const;

@@ -25,12 +25,15 @@ import {
 // describeReport is also exported by pdf/compress.ts; alias to keep both.
 import { readMetadata, summarise, describeReport as describeExif } from '../src/lib/exif/read.ts';
 import {
-  styleOf, toLines, toBlocks, lineText, proseSpans, tidyEmphasis, bodySize,
-  bodyMargin, markerOf, isListLine, isGap, cellStarts, findTableRuns,
-  looksScanned, unmappedRatio, looksMultiColumn,
+  styleOf, familyOf, toLines, toBlocks, lineText, proseSpans, tidyEmphasis,
+  bodySize, bodyMargin, markerOf, isListLine, isGap, cellStarts, findTableRuns,
+  looksScanned, unmappedRatio, looksMultiColumn, assignListDepths,
+  furnitureFlags,
 } from '../src/lib/pdf/textitems.ts';
 import { escapeXml, runXml, buildDocx } from '../src/lib/docx/ooxml.ts';
-import { looksLikePdf, describeConversion, CONVERT_CAVEATS } from '../src/lib/pdf/toword.ts';
+import {
+  looksLikePdf, describeConversion, describeFurniture, CONVERT_CAVEATS,
+} from '../src/lib/pdf/toword.ts';
 import { stripMetadata, imageDataOf, minimalOrientationTiff } from '../src/lib/exif/strip.ts';
 import {
   buildJpeg, buildPng, buildWebp, richExif, buildTiff, TYPE,
@@ -3777,7 +3780,7 @@ function pdfItems(rows) {
   const report = (counts, pages = 1, empty = false) => ({
     bytes: new Uint8Array(0), pages: Array.from({ length: pages }, (_, i) => ({
       page: i + 1, lines: 1, blocks: 1, scanned: false, multiColumn: false, unreadableRatio: 0,
-    })), counts, warnings: [], empty,
+    })), counts, warnings: [], furnitureDropped: 0, empty,
   });
 
   ok(
@@ -3792,6 +3795,14 @@ function pdfItems(rows) {
   ok(/3 pages/.test(described), 'and the pages they came from');
   ok(/1 paragraph\b/.test(describeConversion(report({ paragraph: 1 }))), 'singular reads correctly');
 
+  // What was left out has to be said, not silently done.
+  eq(describeFurniture(report({})), '', 'nothing dropped, nothing to report');
+  const oneLine = describeFurniture({ ...report({}), furnitureDropped: 1 });
+  ok(/1 repeated header or footer line,/.test(oneLine), 'one line reads singular: ' + oneLine);
+  const manyLines = describeFurniture({ ...report({}), furnitureDropped: 8 });
+  ok(/8 repeated header or footer lines/.test(manyLines), 'and several read plural');
+  ok(/every page/.test(manyLines), 'with the reason given, not just the count');
+
   ok(CONVERT_CAVEATS.length >= 4, 'the caveats are stated rather than discovered');
   ok(
     CONVERT_CAVEATS.some((caveat) => /OCR/.test(caveat)),
@@ -3801,6 +3812,313 @@ function pdfItems(rows) {
     CONVERT_CAVEATS.some((caveat) => /inferred/.test(caveat)),
     'and that the structure is inferred rather than read',
   );
+}
+
+/* --------------------------------------------- pdf to word: tier 1 fixes */
+
+{
+  // ---- the typeface family, not just its weight ----
+  eq(familyOf('Carlito-Bold-8774'), 'Carlito', 'a hyphenated face is stripped to its family');
+  eq(familyOf('Carlito-Regular-6171'), 'Carlito', 'as is Regular');
+  eq(familyOf('ABCDEF+Helvetica-BoldOblique'), 'Arial', 'a subset prefix and two face words come off');
+  eq(familyOf('ArialMT'), 'Arial', 'a run-together PostScript suffix comes off');
+  eq(familyOf('TimesNewRomanPS-BoldItalicMT'), 'Times New Roman', 'and the worst of them resolves');
+  eq(familyOf('Arial,Bold'), 'Arial', 'a comma separates family from face too');
+  eq(familyOf('Courier'), 'Courier New', 'a base-14 name maps to an installed equivalent');
+  eq(familyOf('Times-Roman'), 'Times New Roman', 'and so does Times');
+  eq(familyOf('Calibri'), 'Calibri', 'a plain family is left alone');
+  // "Pro" and "Std" are part of the family in Adobe's names, not a face.
+  eq(familyOf('SourceSansPro-Semibold'), 'SourceSansPro', 'Pro belongs to the family, not the face');
+  eq(familyOf('MinionPro-It'), 'MinionPro', 'while It is an abbreviated face');
+  eq(familyOf('MT'), 'MT', 'a name that is only a suffix is not eaten');
+  eq(familyOf(''), '', 'and nothing yields nothing');
+
+  // Carried onto the spans, and never fused across families.
+  const twoFamilies = toLines([
+    { text: 'serif', x: 64, y: 700, width: 30, size: 11, font: 'Times-Roman', eol: false },
+    { text: 'sans', x: 94, y: 700, width: 30, size: 11, font: 'Arial', eol: false },
+  ]);
+  deep(
+    twoFamilies[0].spans.map((s) => s.family),
+    ['Times New Roman', 'Arial'],
+    'each span keeps its own family',
+  );
+  eq(twoFamilies[0].spans.length, 2, 'so two families stay two runs');
+
+  const oneFamily = toLines([
+    { text: 'aa', x: 64, y: 700, width: 20, size: 11, font: 'Arial', eol: false },
+    { text: 'bb', x: 84, y: 700, width: 20, size: 11, font: 'Arial', eol: false },
+  ]);
+  eq(oneFamily[0].spans.length, 1, 'while one family stays one run');
+
+  // And written into the document.
+  const withFamily = runXml({
+    text: 'x', bold: false, italic: false, mono: false, size: 11, x: 0, width: 10,
+    family: 'Times New Roman',
+  });
+  ok(/w:ascii="Times New Roman"/.test(withFamily), 'the run declares its family');
+  ok(/w:hAnsi="Times New Roman"/.test(withFamily), 'for the high-ANSI range too');
+  const noFamily = runXml({
+    text: 'x', bold: false, italic: false, mono: false, size: 11, x: 0, width: 10,
+  });
+  ok(!/w:rFonts/.test(noFamily), 'a span with no family falls back to the document default');
+}
+
+{
+  // ---- nested lists ----
+  const at = (indent) => ({ kind: 'list', marker: 'bullet', indent, spans: [] });
+  const nested = [at(0), at(18), at(36), at(18), at(0)];
+  assignListDepths(nested);
+  deep(nested.map((b) => b.depth), [0, 1, 2, 1, 0], 'three indents become three levels, in order');
+
+  const flat = [at(18), at(18), at(18)];
+  assignListDepths(flat);
+  deep(flat.map((b) => b.depth), [0, 0, 0], 'one indent is all one level, however deep it sits');
+
+  const jittery = [at(18), at(20), at(19)];
+  assignListDepths(jittery);
+  deep(jittery.map((b) => b.depth), [0, 0, 0], 'indents within a couple of points are the same level');
+
+  const deepPile = [at(0), at(18), at(36), at(54), at(72)];
+  assignListDepths(deepPile);
+  deep(
+    deepPile.map((b) => b.depth),
+    [0, 1, 2, 2, 2],
+    'and depth is capped at the three levels the numbering defines',
+  );
+
+  // Real geometry, end to end.
+  const listBlocks = toBlocks(toLines(pdfItems([
+    { y: 700, x: 82, parts: [{ text: '\u2022', width: 5.5, gap: 12.5 }, 'Outer'] },
+    { y: 680, x: 110, parts: [{ text: '\u2022', width: 5.5, gap: 12.5 }, 'Inner'] },
+    { y: 660, x: 82, parts: [{ text: '\u2022', width: 5.5, gap: 12.5 }, 'Outer again'] },
+  ])));
+  deep(
+    listBlocks.map((b) => b.depth),
+    [0, 1, 0],
+    'an indented bullet is recognised as a sub-item',
+  );
+
+  const doc = buildDocx([
+    { kind: 'list', marker: 'bullet', depth: 0, spans: [{ text: 'a', bold: false, italic: false, mono: false, size: 11, x: 0, width: 5 }] },
+    { kind: 'list', marker: 'number', depth: 2, spans: [{ text: 'b', bold: false, italic: false, mono: false, size: 11, x: 0, width: 5 }] },
+  ]);
+  const xml = new TextDecoder().decode(doc.files['word/document.xml']);
+  ok(/<w:ilvl w:val="0"\/><w:numId w:val="1"\/>/.test(xml), 'an outer bullet is written at level 0');
+  ok(/<w:ilvl w:val="2"\/><w:numId w:val="2"\/>/.test(xml), 'and a nested number at level 2');
+
+  // Each definition needs all three levels of its own. Counting across the
+  // whole file let the numbered definition cover for the bullet one.
+  const numbering = new TextDecoder().decode(doc.files['word/numbering.xml']);
+  const definitions = numbering.match(/<w:abstractNum[\s\S]*?<\/w:abstractNum>/g) ?? [];
+  eq(definitions.length, 2, 'there are two list definitions, bullets and numbers');
+  for (const [index, definition] of definitions.entries()) {
+    const levels = (definition.match(/<w:lvl w:ilvl="/g) ?? []).length;
+    eq(
+      levels,
+      3,
+      'definition ' + index + ' declares three levels, or its nested items render unmarked',
+    );
+  }
+  ok(/lowerLetter/.test(numbering), 'the second numbered level uses letters, as Word does');
+  ok(/lowerRoman/.test(numbering), 'and the third uses roman numerals');
+}
+
+{
+  // ---- running headers and footers ----
+  const page = (lines) => ({ lines: toLines(pdfItems(lines)), height: 842 });
+
+  // Widths matter as much as positions: furniture is recognised partly by
+  // being SHORT for its column, so a fixture whose body line is no wider than
+  // its header does not resemble any real page.
+  const header = { y: 800, parts: [{ text: 'Acme Corporation — Internal', width: 148 }] };
+  const body = (n) => ({
+    y: 600,
+    parts: [{ text: 'a full width line of body text unique to page ' + n, width: 440 }],
+  });
+  const footer = (n) => ({
+    y: 40,
+    parts: [{ text: 'Confidential | Page ' + n + ' of 3', width: 120 }],
+  });
+
+  const pages = [
+    page([header, body(1), footer(1)]),
+    page([header, body(2), footer(2)]),
+    page([header, body(3), footer(3)]),
+  ];
+  const flags = furnitureFlags(pages);
+  deep(flags[0], [true, false, true], 'the repeated header and footer are marked on page 1');
+  deep(flags[1], [true, false, true], 'and page 2');
+  deep(flags[2], [true, false, true], 'and page 3');
+
+  // The page number changes every time, which is exactly why digits are
+  // blanked before the texts are compared.
+  ok(
+    /Page 1 of 3/.test(lineText(pages[0].lines[2])),
+    'the footer really does differ page to page',
+  );
+
+  // A single page has nothing to repeat against, so nothing may be dropped.
+  const alone = furnitureFlags([page([header, body(1), footer(1)])]);
+  deep(alone[0], [false, false, false], 'a one-page document never loses a line');
+
+  // A SHORT line, at a fixed height, repeating on every page -- and still not
+  // furniture, because it is in the middle of the page. Only the zone test
+  // separates this from a running header: a form label or a standing pull
+  // quote looks exactly like one otherwise.
+  const midPage = [
+    page([{ y: 420, parts: [{ text: 'Reference: A-17', width: 90 }] }, body(1)]),
+    page([{ y: 420, parts: [{ text: 'Reference: A-17', width: 90 }] }, body(2)]),
+    page([{ y: 420, parts: [{ text: 'Reference: A-17', width: 90 }] }, body(3)]),
+  ];
+  deep(
+    furnitureFlags(midPage).map((f) => f[0]),
+    [false, false, false],
+    'a short repeated line in the middle of the page is content, not furniture',
+  );
+
+  // The band is part of the identity. The same words at the top of two pages
+  // and the bottom of a third are a header twice over, not one thing appearing
+  // three times in no particular place.
+  const bothBands = [
+    page([{ y: 800, parts: [{ text: 'Draft — not for circulation', width: 130 }] }, body(1)]),
+    page([{ y: 800, parts: [{ text: 'Draft — not for circulation', width: 130 }] }, body(2)]),
+    page([body(3), { y: 40, parts: [{ text: 'Draft — not for circulation', width: 130 }] }]),
+  ];
+  const banded = furnitureFlags(bothBands);
+  deep(
+    [banded[0][0], banded[1][0]],
+    [true, true],
+    'the two lines that share a band are furniture',
+  );
+  eq(
+    banded[2].filter(Boolean).length,
+    0,
+    'and the lone one in the other band is not, since it repeats nowhere',
+  );
+
+  // A header that appears on only one page of many is not furniture.
+  const once = [
+    page([{ y: 800, parts: ['only here'] }, body(1)]),
+    page([body(2)]),
+    page([body(3)]),
+  ];
+  eq(furnitureFlags(once)[0][0], false, 'a line appearing on one page of three is not furniture');
+
+  // Two pages: both must carry it, since the threshold is at least two pages.
+  const twoOfTwo = [page([header, body(1)]), page([header, body(2)])];
+  deep(
+    furnitureFlags(twoOfTwo).map((f) => f[0]),
+    [true, true],
+    'a header on both pages of a two-page document is furniture',
+  );
+  const oneOfTwo = [page([header, body(1)]), page([body(2)])];
+  eq(furnitureFlags(oneOfTwo)[0][0], false, 'but not one that appears on only one of them');
+
+  // A wrapped body line that repeats by coincidence must survive. Blanking
+  // digits makes "Paragraph 1 of the body" and "Paragraph 12 of the body"
+  // identical, so width is what tells them apart from a running header.
+  const wideRepeat = [
+    page([
+      { y: 800, parts: [{ text: 'Paragraph 1 of the body and more text besides', width: 440 }] },
+      body(1),
+    ]),
+    page([
+      { y: 800, parts: [{ text: 'Paragraph 12 of the body and more text besides', width: 440 }] },
+      body(2),
+    ]),
+  ];
+  deep(
+    furnitureFlags(wideRepeat).map((f) => f[0]),
+    [false, false],
+    'a full-width line is never furniture, however well its text matches',
+  );
+
+  // Furniture does not move. A short line repeating at a drifting height is
+  // content that happens to recur, not a header.
+  const drifting = [
+    page([{ y: 800, parts: [{ text: 'Chapter heading', width: 90 }] }, body(1)]),
+    page([{ y: 770, parts: [{ text: 'Chapter heading', width: 90 }] }, body(2)]),
+  ];
+  deep(
+    furnitureFlags(drifting).map((f) => f[0]),
+    [false, false],
+    'a short repeated line at a different height each time is left alone',
+  );
+
+  const anchored = [
+    page([{ y: 800, parts: [{ text: 'Chapter heading', width: 90 }] }, body(1)]),
+    page([{ y: 799, parts: [{ text: 'Chapter heading', width: 90 }] }, body(2)]),
+  ];
+  deep(
+    furnitureFlags(anchored).map((f) => f[0]),
+    [true, true],
+    'while a point of jitter is still the same fixed position',
+  );
+
+  eq(furnitureFlags([]).length, 0, 'no pages, no flags');
+}
+
+{
+  // ---- a wrapped table cell is not a new row ----
+  // Middle column wraps onto a second line; the other columns are empty there.
+  const wrapped = toLines(pdfItems([
+    { y: 700, x: 68, parts: [{ text: 'Region', width: 30, gap: 128 }, { text: 'Comment', width: 40, gap: 118 }, { text: 'Q2', width: 13 }] },
+    { y: 677, x: 68, parts: [{ text: 'North', width: 26, gap: 132 }, { text: 'a long remark that', width: 90, gap: 68 }, { text: '1580', width: 22 }] },
+    { y: 662, x: 226, parts: [{ text: 'wrapped onto a second line', width: 130 }] },
+    { y: 639, x: 68, parts: [{ text: 'South', width: 26, gap: 132 }, { text: 'short', width: 26, gap: 132 }, { text: '1105', width: 22 }] },
+  ]));
+
+  const runs = findTableRuns(wrapped);
+  eq(runs.length, 1, 'the wrapped line does not split the table in two');
+  deep(runs[0].continuations, [2], 'and is recorded as a continuation of the row above');
+
+  const blocks = toBlocks(wrapped);
+  eq(blocks.length, 1, 'the whole thing is one table');
+  eq(blocks[0].kind, 'table', 'of kind table');
+  eq(blocks[0].rows.length, 3, 'with three rows, not four');
+  const cells = blocks[0].rows.map((row) => row.map((cell) => cell.map((s) => s.text).join('')));
+  deep(cells[0], ['Region', 'Comment', 'Q2'], 'the header row is unaffected');
+  eq(
+    cells[1][1],
+    'a long remark that wrapped onto a second line',
+    'the wrapped text is folded into its own cell: ' + JSON.stringify(cells[1][1]),
+  );
+  deep(cells[1][0] ? [cells[1][0], cells[1][2]] : [], ['North', '1580'], 'without disturbing its neighbours');
+  deep(cells[2], ['South', 'short', '1105'], 'and the row after it is still a row');
+
+  // Two lines with one wide gap between them are a paragraph, not a table --
+  // counting a continuation towards the two-row minimum would break this.
+  const notATable = findTableRuns(toLines(pdfItems([
+    { y: 700, x: 64, parts: [{ text: 'a heading', width: 50, gap: 120 }, { text: 'and a date', width: 50 }] },
+    { y: 685, x: 64, parts: [{ text: 'a following line of prose', width: 120 }] },
+  ])));
+  eq(notATable.length, 0, 'one row plus a continuation is not a table');
+
+  // A continuation must be at wrap spacing; a paragraph gap ends the table.
+  const spacedOut = findTableRuns(toLines(pdfItems([
+    { y: 700, x: 68, parts: [{ text: 'Region', width: 30, gap: 128 }, { text: 'Q1', width: 13 }] },
+    { y: 677, x: 68, parts: [{ text: 'North', width: 26, gap: 132 }, { text: '1240', width: 22 }] },
+    { y: 600, x: 226, parts: [{ text: 'a distant paragraph', width: 100 }] },
+  ])));
+  eq(spacedOut.length, 1, 'the table is still found');
+  deep(spacedOut[0].continuations, [], 'and a distant line is not absorbed into it');
+  eq(spacedOut[0].to, 1, 'so the run ends at the last real row');
+
+  // A line at wrap spacing, but starting between the columns rather than at
+  // one of them, is prose that happens to follow a table.
+  const offColumn = findTableRuns(toLines(pdfItems([
+    { y: 700, x: 68, parts: [{ text: 'Region', width: 30, gap: 128 }, { text: 'Q1', width: 13 }] },
+    { y: 677, x: 68, parts: [{ text: 'North', width: 26, gap: 132 }, { text: '1240', width: 22 }] },
+    { y: 662, x: 150, parts: [{ text: 'a line starting nowhere in particular', width: 150 }] },
+  ])));
+  eq(offColumn.length, 1, 'the table is found');
+  deep(
+    offColumn[0].continuations,
+    [],
+    'and a line beginning between the columns is not taken for a wrapped cell',
+  );
+  eq(offColumn[0].to, 1, 'so it stays outside the table');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
