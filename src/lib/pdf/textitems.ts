@@ -199,6 +199,22 @@ const SPACE_RATIO = 0.22;
  * table row becomes a sentence.
  */
 const GAP_RATIO = 0.8;
+/**
+ * How wide a gap must be, relative to the font size, to be a TABLE COLUMN.
+ *
+ * Splitting a span at 0.8x is cheap and reversible — prose puts the pieces back
+ * together with a single space and nothing is lost. Declaring a column is a
+ * structural claim, and it needs much stronger evidence, because justified text
+ * stretches its spaces to reach both margins and those stretched spaces look
+ * exactly like small column gaps.
+ *
+ * Measured: the repo's own justifier, given deliberately long words, produced
+ * spaces of 2.14x the font size, and it permits slack up to a quarter of the
+ * line width, so worse is possible. A real table's gaps were 11.6x. The two
+ * populations are far apart; the old single threshold sat in the wrong one and
+ * read justified paragraphs as two-column tables.
+ */
+const CELL_GAP_RATIO = 2.5;
 
 const sameStyle = (a: Span, b: Span) =>
   a.bold === b.bold &&
@@ -548,9 +564,16 @@ export function findTableRuns(lines: Line[]): ColumnRun[] {
       break;
     }
 
-    // Two real rows are the minimum. Counting continuations here would let a
-    // two-line paragraph with one wide gap pass as a table.
-    if (j - i - continuations.length >= 2) {
+    // How much agreement is enough.
+    //
+    // cellStarts always reports the line's own left edge, so "two shared
+    // columns" only ever meant ONE agreeing interior gap — far too little. A
+    // table with three or more columns is convincing on two rows; a
+    // two-column one has a single interior gap to go on, and needs three rows
+    // before it is more likely a table than a coincidence.
+    const rows = j - i - continuations.length;
+    const enough = shared.length >= 3 ? rows >= 2 : rows >= 3;
+    if (enough && rows >= 2) {
       runs.push({ from: i, to: j - 1, columns: shared, continuations });
       i = j;
     } else {
@@ -580,7 +603,9 @@ function continuesRow(line: Line, previous: Line, columns: number[]): boolean {
 export function cellStarts(line: Line): number[] {
   const starts = [line.x];
   for (let i = 0; i < line.spans.length; i++) {
-    if (!isGap(line.spans[i])) continue;
+    const span = line.spans[i];
+    // A stretched word space is a gap, but not a column.
+    if (!isGap(span) || span.width < span.size * CELL_GAP_RATIO) continue;
     const next = line.spans[i + 1];
     if (next && !isGap(next)) starts.push(next.x);
   }

@@ -29,7 +29,7 @@ import { zipSync, unzipSync, strToU8 } from 'fflate';
 import { docxToPdf as docxToPdfRaw, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
 import {
   toLines, toBlocks, bodySize, lineText, looksScanned, unmappedRatio,
-  furnitureFlags,
+  furnitureFlags, cellStarts, findTableRuns, isGap,
 } from '../src/lib/pdf/textitems.ts';
 import { buildDocx as buildDocxParts } from '../src/lib/docx/ooxml.ts';
 import mammothLib from 'mammoth';
@@ -2193,6 +2193,127 @@ const plain = await makePlain();
     .map((block) => (block.spans ?? []).map((span) => span.text).join(''))
     .join('\n');
   ok(/Acme Corporation/.test(whole), 'keeping headers and footers keeps them');
+}
+
+/* ------------------------- 18. pdf to word: justified text */
+
+/**
+ * Justified prose must not come back as a table.
+ *
+ * Columns are found by looking for a horizontal gap. Justification stretches
+ * inter-word spaces to reach both margins, and those stretched spaces look
+ * exactly like narrow column gaps — so this is the adversarial case for the
+ * whole table heuristic, and it is the one that academic, legal and
+ * book-derived PDFs are full of.
+ *
+ * It is not hypothetical: before the two thresholds were separated, this very
+ * fixture produced two tables and turned three paragraphs into seven blocks.
+ * The words are long on purpose, so a line holds few of them and the slack has
+ * nowhere to go but into two or three spaces.
+ */
+{
+  const WNS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const justify = (text) =>
+    `<w:p><w:pPr><w:jc w:val="both"/></w:pPr><w:r><w:t xml:space="preserve">${text}</w:t></w:r></w:p>`;
+
+  const HOSTILE =
+    'Notwithstanding aforementioned incontrovertible constitutional ' +
+    'interpretations, counterrevolutionary internationalisation remains ' +
+    'incomprehensible. Uncharacteristically, disproportionate ' +
+    'misrepresentations overshadowed straightforward acknowledgements ' +
+    'throughout parliamentary deliberations. Notwithstanding aforementioned ' +
+    'incontrovertible constitutional interpretations, counterrevolutionary ' +
+    'internationalisation remains incomprehensible today.';
+  const ORDINARY =
+    'This is an ordinary justified paragraph with words of the sort that turn ' +
+    'up in most documents, so the spaces need only a little stretching to ' +
+    'reach the right margin on each line of the block, which is the common ' +
+    'case rather than the worst one.';
+
+  const source = zipSync({
+    '[Content_Types].xml': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+        '</Types>',
+    ),
+    '_rels/.rels': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+        '</Relationships>',
+    ),
+    'word/document.xml': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        `<w:document ${WNS}><w:body>` +
+        justify(HOSTILE) + justify(ORDINARY) + justify(HOSTILE) +
+        '</w:body></w:document>',
+    ),
+  });
+
+  const made = await docxToPdf(source);
+  const justifiedPdf = made.bytes ?? made;
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(justifiedPdf),
+    isEvalSupported: false,
+  }).promise;
+
+  const lines = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+    const content = await page.getTextContent();
+    const items = [];
+    for (const item of content.items) {
+      if (typeof item.str !== 'string' || !item.transform) continue;
+      const t = item.transform;
+      items.push({
+        text: item.str,
+        x: t[4],
+        y: t[5],
+        width: item.width ?? 0,
+        size: Math.hypot(t[0], t[1]) || item.height || 11,
+        font: item.fontName ?? '',
+        eol: item.hasEOL === true,
+      });
+    }
+    lines.push(...toLines(items));
+  }
+  ok(lines.length >= 10, `the fixture produced enough lines to judge (${lines.length})`);
+
+  // The spaces really were stretched past the span-splitting threshold —
+  // otherwise this fixture proves nothing.
+  const widest = Math.max(
+    0,
+    ...lines.flatMap((line) =>
+      line.spans.filter((span) => /^\s+$/.test(span.text)).map((span) => span.width / span.size),
+    ),
+  );
+  ok(widest > 1.5, `justification stretched a space to ${widest.toFixed(2)}x the font size`);
+  ok(
+    lines.some((line) => line.spans.some(isGap)),
+    'so some spans were split at a gap, as intended',
+  );
+
+  // And yet none of it is a column.
+  ok(
+    lines.every((line) => cellStarts(line).length === 1),
+    'no justified line reports a column boundary',
+  );
+  eq(findTableRuns(lines).length, 0, 'and no table run is found in justified prose');
+
+  const blocks = toBlocks(lines);
+  const kinds = [...new Set(blocks.map((block) => block.kind))];
+  deep(kinds, ['paragraph'], 'every block is a paragraph');
+  eq(blocks.length, 3, 'three justified paragraphs in, three blocks out');
+
+  const text = blocks
+    .map((block) => (block.spans ?? []).map((span) => span.text).join(''))
+    .join('\n');
+  ok(!/ {2,}/.test(text), 'no stretched space survives as more than one space');
+  ok(/parliamentary deliberations/.test(text), 'the middle of the hostile paragraph is intact');
+  ok(/than the worst one\./.test(text), 'and the ordinary paragraph ends where it should');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

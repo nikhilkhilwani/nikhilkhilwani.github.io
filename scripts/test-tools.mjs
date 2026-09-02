@@ -3606,6 +3606,59 @@ function pdfItems(rows) {
 }
 
 {
+  // ---- how much evidence a table needs ----
+  //
+  // cellStarts always reports the line's own left edge, so the old "two shared
+  // columns" test really asked for ONE agreeing interior gap. Justified prose,
+  // whose stretched spaces land in near-enough the same places on consecutive
+  // lines, met it — and came out as a two-column table.
+  const twoCol = (y) => ({
+    y,
+    x: 68,
+    parts: [{ text: 'Region', width: 30, gap: 128 }, { text: 'Q1', width: 13 }],
+  });
+  eq(
+    findTableRuns(toLines(pdfItems([twoCol(700), twoCol(677)]))).length,
+    0,
+    'two columns and two rows is not enough evidence for a table',
+  );
+  eq(
+    findTableRuns(toLines(pdfItems([twoCol(700), twoCol(677), twoCol(654)]))).length,
+    1,
+    'but two columns and three rows is',
+  );
+
+  const threeColRow = (y) => ({
+    y,
+    x: 68,
+    parts: [
+      { text: 'Region', width: 30, gap: 128 },
+      { text: 'Q1', width: 13, gap: 145 },
+      { text: 'Q2', width: 13 },
+    ],
+  });
+  eq(
+    findTableRuns(toLines(pdfItems([threeColRow(700), threeColRow(677)]))).length,
+    1,
+    'while three columns are convincing on two rows',
+  );
+
+  // A stretched word space is a gap, but it is not a column. Justification can
+  // reach twice the font size and more; a real table's gaps were 11.6x.
+  const stretched = toLines(pdfItems([
+    { y: 700, x: 64, parts: [{ text: 'one', width: 18, gap: 22 }, { text: 'two', width: 18, gap: 22 }, { text: 'three', width: 28 }] },
+  ]))[0];
+  ok(stretched.spans.some(isGap), 'a two-times space is still recorded as a gap');
+  deep(cellStarts(stretched), [64], 'but reports no column boundary');
+  eq(lineText(stretched), 'one two three', 'and reads back as ordinary words');
+
+  const columnGap = toLines(pdfItems([
+    { y: 700, x: 64, parts: [{ text: 'one', width: 18, gap: 120 }, { text: 'two', width: 18 }] },
+  ]))[0];
+  eq(cellStarts(columnGap).length, 2, 'while a table-sized gap does report one');
+}
+
+{
   // ---- gaps, prose spans and emphasis tidying ----
   const line = toLines(pdfItems([
     { y: 700, parts: [{ text: 'left', width: 20, gap: 100 }, { text: 'right', width: 20 }] },
@@ -4095,30 +4148,63 @@ function pdfItems(rows) {
   ])));
   eq(notATable.length, 0, 'one row plus a continuation is not a table');
 
+  // The same point where the column count is not doing the work: three
+  // columns are convincing on two ROWS, and a wrapped continuation is not a
+  // row. Counting it as one would accept a single line plus its overflow.
+  const oneRowPlusWrap = findTableRuns(toLines(pdfItems([
+    {
+      y: 700,
+      x: 68,
+      parts: [
+        { text: 'Region', width: 30, gap: 128 },
+        { text: 'Q1', width: 13, gap: 145 },
+        { text: 'Q2', width: 13 },
+      ],
+    },
+    { y: 685, x: 226, parts: [{ text: 'a wrapped remark', width: 80 }] },
+  ])));
+  eq(
+    oneRowPlusWrap.length,
+    0,
+    'three columns over one row and its overflow is still only one row',
+  );
+
+  // Three columns, because a two-column table needs three rows before it
+  // counts -- see the evidence rule below.
+  const threeCol = (y) => ({
+    y,
+    x: 68,
+    parts: [
+      { text: 'Region', width: 30, gap: 128 },
+      { text: 'Q1', width: 13, gap: 145 },
+      { text: 'Q2', width: 13 },
+    ],
+  });
+
   // A continuation must be at wrap spacing; a paragraph gap ends the table.
   const spacedOut = findTableRuns(toLines(pdfItems([
-    { y: 700, x: 68, parts: [{ text: 'Region', width: 30, gap: 128 }, { text: 'Q1', width: 13 }] },
-    { y: 677, x: 68, parts: [{ text: 'North', width: 26, gap: 132 }, { text: '1240', width: 22 }] },
+    threeCol(700),
+    threeCol(677),
     { y: 600, x: 226, parts: [{ text: 'a distant paragraph', width: 100 }] },
   ])));
   eq(spacedOut.length, 1, 'the table is still found');
-  deep(spacedOut[0].continuations, [], 'and a distant line is not absorbed into it');
-  eq(spacedOut[0].to, 1, 'so the run ends at the last real row');
+  deep(spacedOut[0]?.continuations ?? null, [], 'and a distant line is not absorbed into it');
+  eq(spacedOut[0]?.to, 1, 'so the run ends at the last real row');
 
   // A line at wrap spacing, but starting between the columns rather than at
   // one of them, is prose that happens to follow a table.
   const offColumn = findTableRuns(toLines(pdfItems([
-    { y: 700, x: 68, parts: [{ text: 'Region', width: 30, gap: 128 }, { text: 'Q1', width: 13 }] },
-    { y: 677, x: 68, parts: [{ text: 'North', width: 26, gap: 132 }, { text: '1240', width: 22 }] },
+    threeCol(700),
+    threeCol(677),
     { y: 662, x: 150, parts: [{ text: 'a line starting nowhere in particular', width: 150 }] },
   ])));
   eq(offColumn.length, 1, 'the table is found');
   deep(
-    offColumn[0].continuations,
+    offColumn[0]?.continuations ?? null,
     [],
     'and a line beginning between the columns is not taken for a wrapped cell',
   );
-  eq(offColumn[0].to, 1, 'so it stays outside the table');
+  eq(offColumn[0]?.to, 1, 'so it stays outside the table');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);
