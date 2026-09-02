@@ -27,6 +27,11 @@ import { recompressImages, flattenToImages, percentSaved, estimateRecompress, de
 import sharp from 'sharp';
 import { zipSync, unzipSync, strToU8 } from 'fflate';
 import { docxToPdf as docxToPdfRaw, describeConversion, looksLikeDocx } from '../src/lib/docx/topdf.ts';
+import {
+  toLines, toBlocks, bodySize, lineText, looksScanned, unmappedRatio,
+} from '../src/lib/pdf/textitems.ts';
+import { buildDocx as buildDocxParts } from '../src/lib/docx/ooxml.ts';
+import mammothLib from 'mammoth';
 import { readFile as readFileFs } from 'node:fs/promises';
 import { join as joinPath } from 'node:path';
 
@@ -70,6 +75,9 @@ const eq = (a, b, msg) => {
     fail++;
   }
 };
+
+/** Structural comparison, for the list and table shapes. */
+const deep = (a, b, msg) => eq(JSON.stringify(a), JSON.stringify(b), msg);
 
 /* ------------------------------------------------------------- fixtures */
 
@@ -1761,6 +1769,270 @@ const plain = await makePlain();
 
   // Correlation must degrade safely, never misformat.
   ok(describeConversion(result).includes('recovered for'), 'cause A: the summary reports what was recovered');
+}
+
+/* ------------------------------- 16. pdf to word: the round trip */
+
+/**
+ * The only test that can tell whether the inference works: take a document of
+ * KNOWN structure, run it through word-to-pdf, then bring it back and score
+ * what survived. A converter that merely produces a file proves nothing.
+ *
+ * The recovered .docx is then handed to mammoth — a real Word reader — which
+ * is a far stronger validity check than any assertion about the XML.
+ */
+{
+  // Section 15's builders live in its own block scope; these are this
+  // section's own, so the two cannot drift into each other.
+  const part = (name, text) => [name, strToU8(text)];
+  const build = (bodyXml) => {
+    const ns = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+    return zipSync(
+      Object.fromEntries([
+        part(
+          '[Content_Types].xml',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+            '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+            '<Default Extension="xml" ContentType="application/xml"/>' +
+            '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+            '<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>' +
+            '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
+            '</Types>',
+        ),
+        part(
+          '_rels/.rels',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+            '</Relationships>',
+        ),
+        part(
+          'word/document.xml',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<w:document ' + ns + '><w:body>' + bodyXml + '</w:body></w:document>',
+        ),
+        part(
+          'word/_rels/document.xml.rels',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+            '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>' +
+            '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+            '</Relationships>',
+        ),
+        part(
+          'word/numbering.xml',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<w:numbering ' + ns + '>' +
+            '<w:abstractNum w:abstractNumId="0"><w:lvl w:ilvl="0"><w:numFmt w:val="bullet"/><w:lvlText w:val="."/></w:lvl></w:abstractNum>' +
+            '<w:abstractNum w:abstractNumId="1"><w:lvl w:ilvl="0"><w:numFmt w:val="decimal"/><w:lvlText w:val="%1."/></w:lvl></w:abstractNum>' +
+            '<w:num w:numId="1"><w:abstractNumId w:val="0"/></w:num>' +
+            '<w:num w:numId="2"><w:abstractNumId w:val="1"/></w:num>' +
+            '</w:numbering>',
+        ),
+        part(
+          'word/styles.xml',
+          '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+            '<w:styles ' + ns + '>' +
+            '<w:style w:type="paragraph" w:styleId="Heading1"><w:name w:val="heading 1"/></w:style>' +
+            '<w:style w:type="paragraph" w:styleId="Heading2"><w:name w:val="heading 2"/></w:style>' +
+            '</w:styles>',
+        ),
+      ]),
+    );
+  };
+  const p = (text) => '<w:p><w:r><w:t xml:space="preserve">' + text + '</w:t></w:r></w:p>';
+  const h = (level, text) =>
+    '<w:p><w:pPr><w:pStyle w:val="Heading' + level + '"/></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+  const li = (text, numId) =>
+    '<w:p><w:pPr><w:numPr><w:ilvl w:val="0"/><w:numId w:val="' + numId +
+    '"/></w:numPr></w:pPr><w:r><w:t>' + text + '</w:t></w:r></w:p>';
+
+  const rich = build(
+    [
+      h(1, 'Quarterly Review'),
+      p('Prepared for the board.'),
+      h(2, 'Summary'),
+      p(
+        'This paragraph is deliberately long enough that it must wrap across more ' +
+          'than one line when it is laid out, because the hardest part of going back ' +
+          'the other way is deciding which line breaks were the author speaking and ' +
+          'which were only the page running out of room.',
+      ),
+      '<w:p>' +
+        '<w:r><w:t xml:space="preserve">Plain then </w:t></w:r>' +
+        '<w:r><w:rPr><w:b/></w:rPr><w:t xml:space="preserve">bold</w:t></w:r>' +
+        '<w:r><w:t xml:space="preserve"> then </w:t></w:r>' +
+        '<w:r><w:rPr><w:i/></w:rPr><w:t xml:space="preserve">italic</w:t></w:r>' +
+        '<w:r><w:t xml:space="preserve"> then plain again.</w:t></w:r>' +
+        '</w:p>',
+      li('First bullet point', 1),
+      li('Second bullet point', 1),
+      li('Step one', 2),
+      li('Step two', 2),
+      h(2, 'Numbers'),
+      '<w:tbl>' +
+        '<w:tr><w:tc><w:p><w:r><w:t>Region</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>Q1</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>Q2</w:t></w:r></w:p></w:tc></w:tr>' +
+        '<w:tr><w:tc><w:p><w:r><w:t>North</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>1240</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>1580</w:t></w:r></w:p></w:tc></w:tr>' +
+        '<w:tr><w:tc><w:p><w:r><w:t>South</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>980</w:t></w:r></w:p></w:tc>' +
+        '<w:tc><w:p><w:r><w:t>1105</w:t></w:r></w:p></w:tc></w:tr>' +
+        '</w:tbl>',
+      p('A closing paragraph after the table.'),
+    ].join(''),
+  );
+
+  const converted = await docxToPdf(rich);
+  const pdfBytes = converted.bytes ?? converted;
+  ok(pdfBytes.length > 1000, `the fixture converts to a PDF (${pdfBytes.length} bytes)`);
+
+  /* ---- extract, exactly as src/lib/pdf/toword.ts does ---- */
+
+  const doc = await pdfjs.getDocument({
+    data: new Uint8Array(pdfBytes),
+    isEvalSupported: false,
+  }).promise;
+
+  const allItems = [];
+  const allLines = [];
+  const blocks = [];
+  for (let n = 1; n <= doc.numPages; n++) {
+    const page = await doc.getPage(n);
+
+    // Resolve pdf.js's internal font ids to the real names. Weight and slope
+    // are recoverable from nothing else — content.styles reports only a
+    // generic fontFamily.
+    const names = new Map();
+    const ops = await page.getOperatorList();
+    const ids = new Set();
+    for (let i = 0; i < ops.fnArray.length; i++) {
+      if (ops.fnArray[i] === pdfjs.OPS.setFont) ids.add(ops.argsArray[i][0]);
+    }
+    for (const id of ids) {
+      const store = page.commonObjs?.has(id) ? page.commonObjs : page.objs;
+      const object = store?.get(id);
+      if (object && typeof object.name === 'string') names.set(id, object.name);
+    }
+    ok(names.size > 0, `page ${n}: the real font names are reachable (${names.size})`);
+
+    const content = await page.getTextContent();
+    const items = [];
+    for (const item of content.items) {
+      if (typeof item.str !== 'string' || !item.transform) continue;
+      const t = item.transform;
+      items.push({
+        text: item.str,
+        x: t[4],
+        y: t[5],
+        width: item.width ?? 0,
+        size: Math.hypot(t[0], t[1]) || item.height || 11,
+        font: names.get(item.fontName) ?? item.fontName ?? '',
+        eol: item.hasEOL === true,
+      });
+    }
+    allItems.push(...items);
+    const lines = toLines(items);
+    allLines.push(...lines);
+    blocks.push(...toBlocks(lines));
+  }
+
+  /* ---- score the recovery against the original ---- */
+
+  const headings = blocks.filter((b) => b.kind === 'heading');
+  eq(headings.length, 3, 'all three headings are recovered');
+  eq(headings[0].level, 1, 'the title is level 1');
+  eq(
+    headings[0].spans.map((s) => s.text).join(''),
+    'Quarterly Review',
+    'and holds the title text',
+  );
+  deep(
+    headings.slice(1).map((b) => b.level),
+    [2, 2],
+    'the two subheadings are level 2',
+  );
+
+  const long = blocks.find(
+    (b) => b.kind === 'paragraph' && b.spans.some((s) => /deliberately long/.test(s.text)),
+  );
+  ok(!!long, 'the wrapped paragraph comes back as one block, not three');
+  const longText = (long?.spans ?? []).map((s) => s.text).join('');
+  ok(/running out of room\.$/.test(longText.trim()), 'holding all three of its lines');
+  ok(!/laidout/.test(longText), 'with a space where the line broke, not a fused word');
+
+  const lists = blocks.filter((b) => b.kind === 'list');
+  eq(lists.length, 4, 'all four list items are recovered as list items');
+  deep(
+    lists.map((b) => b.marker),
+    ['bullet', 'bullet', 'number', 'number'],
+    'with their marker kinds told apart',
+  );
+  deep(
+    lists.map((b) => b.spans.map((s) => s.text).join('')),
+    ['First bullet point', 'Second bullet point', 'Step one', 'Step two'],
+    'and the marker glyph stripped out of the text',
+  );
+
+  const mixed = blocks.find((b) => (b.spans ?? []).some((s) => /Plain then/.test(s.text)));
+  ok(!!mixed, 'the mixed-formatting paragraph is recovered');
+  eq(
+    (mixed?.spans ?? []).filter((s) => s.bold).map((s) => s.text).join(''),
+    'bold',
+    'with exactly the bold word marked bold',
+  );
+  eq(
+    (mixed?.spans ?? []).filter((s) => s.italic).map((s) => s.text).join(''),
+    'italic',
+    'and exactly the italic word marked italic',
+  );
+
+  const tables = blocks.filter((b) => b.kind === 'table');
+  eq(tables.length, 1, 'the table is recovered as a table');
+  eq(tables[0]?.rows.length, 3, 'with all three rows');
+  const cells = (tables[0]?.rows ?? []).map((row) =>
+    row.map((cell) => cell.map((s) => s.text).join('').trim()),
+  );
+  deep(cells[0], ['Region', 'Q1', 'Q2'], 'the header row splits into its cells');
+  deep(cells[1], ['North', '1240', '1580'], 'and so does a data row');
+  deep(cells[2], ['South', '980', '1105'], 'and the last');
+
+  ok(
+    blocks.some((b) => (b.spans ?? []).some((s) => /A closing paragraph/.test(s.text))),
+    'the paragraph after the table survives',
+  );
+
+  // The honesty checks must stay quiet on an ordinary text PDF.
+  ok(!looksScanned(allItems, 0), 'a text PDF is not reported as a scan');
+  ok(unmappedRatio(allItems) < 0.01, 'and its glyphs map to real characters');
+
+  /* ---- can a real Word reader open what we produced? ---- */
+
+  const { files } = buildDocxParts(blocks, { bodySize: bodySize(allLines) });
+  const rebuilt = zipSync(files, { level: 6 });
+  ok(rebuilt.length > 500, `the .docx is written (${rebuilt.length} bytes)`);
+
+  let html = '';
+  let readError = null;
+  try {
+    const read = await mammothLib.convertToHtml({ buffer: Buffer.from(rebuilt) });
+    html = read.value;
+  } catch (error) {
+    readError = error;
+  }
+  ok(!readError, `mammoth reads the generated file${readError ? `: ${readError.message}` : ''}`);
+
+  ok(/<h1>Quarterly Review<\/h1>/.test(html), 'the title round-trips as a real Word heading');
+  ok(/<h2>Summary<\/h2>/.test(html), 'and so does the subheading');
+  ok(/<strong>bold<\/strong>/.test(html), 'bold survives into Word, on the word alone');
+  ok(/<em>italic<\/em>/.test(html), 'and italic likewise');
+  ok(/<table>/.test(html), 'the table survives as a Word table');
+  eq((html.match(/<li>/g) ?? []).length, 4, 'all four list items survive as list items');
+  ok(/deliberately long enough/.test(html), 'and the long paragraph survives whole');
+  ok(/A closing paragraph after the table\./.test(html), 'along with the text after the table');
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

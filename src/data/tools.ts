@@ -76,6 +76,15 @@ export const tools: ToolMeta[] = [
     category: 'pdf',
   },
   {
+    slug: 'pdf-to-word',
+    title: 'PDF to Word',
+    description:
+      'Rebuild an editable .docx from a PDF — headings, paragraphs, lists and tables recovered from the layout.',
+    icon: 'file-word',
+    status: 'available',
+    category: 'pdf',
+  },
+  {
     slug: 'compress-pdf',
     title: 'Compress PDF',
     description: 'Shrink a PDF by recompressing its embedded images, leaving text and vectors sharp.',

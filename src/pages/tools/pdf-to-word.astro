@@ -1,0 +1,361 @@
+---
+import ToolLayout from '../../layouts/ToolLayout.astro';
+import Dropzone from '../../components/Dropzone.astro';
+import Icon from '../../components/Icon.astro';
+import { CONVERT_CAVEATS } from '../../lib/pdf/toword.ts';
+---
+
+<ToolLayout slug="pdf-to-word">
+  <div class="pw">
+    <Dropzone
+      id="pw-file"
+      accept="application/pdf,.pdf"
+      icon="file-word"
+      label="Choose a PDF, or drop it anywhere"
+      hint="Text-based PDFs convert best. A scan has no text to recover — that needs OCR."
+    />
+
+    <p class="pw__promise">
+      <Icon name="lock" size={15} />
+      <span>Nothing is uploaded. The file never leaves this tab.</span>
+    </p>
+
+    <section class="panel pw__controls" id="pw-controls" hidden>
+      <p class="eyebrow">Rebuild</p>
+      <div class="pw__switches">
+        <label class="pw__switch">
+          <input type="checkbox" id="pw-opt-tables" checked />
+          <span>
+            <strong>Tables</strong>
+            <small>Recover tables from column alignment. Off puts each row on one line.</small>
+          </span>
+        </label>
+        <label class="pw__switch">
+          <input type="checkbox" id="pw-opt-breaks" checked />
+          <span>
+            <strong>Page breaks</strong>
+            <small>Start a new Word page wherever the PDF started one.</small>
+          </span>
+        </label>
+      </div>
+
+      <div class="pw__actions">
+        <button type="button" class="btn btn--primary" id="pw-run">
+          <Icon name="file-word" size={16} /> Convert to Word
+        </button>
+        <button type="button" class="btn" id="pw-clear">
+          <Icon name="x" size={16} /> Clear
+        </button>
+      </div>
+      <p class="pw__note" id="pw-note" aria-live="polite"></p>
+    </section>
+
+    <section class="pw__out" id="pw-out" aria-live="polite"></section>
+
+    <details class="panel pw__caveats">
+      <summary>What a PDF cannot tell us</summary>
+      <p class="pw__why">
+        A PDF records where ink went, not what the author meant. It holds no
+        paragraphs, headings, lists or tables — those are worked out from
+        spacing, size and alignment, so the limits below are the format's rather
+        than the effort's.
+      </p>
+      <ul>
+        {CONVERT_CAVEATS.map((caveat) => <li>{caveat}</li>)}
+      </ul>
+    </details>
+  </div>
+</ToolLayout>
+
+<style>
+  .pw { display: grid; gap: 1rem; }
+
+  .pw__promise {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin: 0;
+    font-size: 0.85rem;
+    color: var(--ink-dim);
+  }
+
+  .pw__controls { display: grid; gap: 0.9rem; }
+  .pw__switches {
+    display: grid;
+    gap: 0.6rem;
+    grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr));
+  }
+  .pw__switch {
+    display: grid;
+    grid-template-columns: auto 1fr;
+    gap: 0.6rem;
+    align-items: start;
+    cursor: pointer;
+  }
+  .pw__switch input { margin-top: 0.25rem; }
+  .pw__switch strong { display: block; font-weight: 500; font-size: 0.9rem; }
+  .pw__switch small { color: var(--ink-faint); font-size: 0.78rem; line-height: 1.45; }
+
+  .pw__actions { display: flex; flex-wrap: wrap; gap: 0.5rem; }
+  .pw__note { margin: 0; font-size: 0.85rem; color: var(--ink-dim); }
+  .pw__note:empty { display: none; }
+
+  .pw__out:empty { display: none; }
+
+  .pw__caveats summary { cursor: pointer; font-size: 0.9rem; font-weight: 500; }
+  .pw__why {
+    margin: 0.75rem 0 0.5rem;
+    font-size: 0.85rem;
+    color: var(--ink-dim);
+    max-width: 60ch;
+  }
+  .pw__caveats ul {
+    margin: 0;
+    padding-left: 1.1rem;
+    color: var(--ink-dim);
+    font-size: 0.85rem;
+    display: grid;
+    gap: 0.4rem;
+  }
+</style>
+
+<!--
+  Runtime-built nodes carry no [data-astro-cid-*], so Astro's scoped CSS never
+  reaches them. Everything the script creates is styled here, under the pw__
+  prefix. scripts/test-dom.mjs enforces this.
+-->
+<style is:global>
+  .pw__result {
+    display: grid;
+    gap: 0.9rem;
+    border: 1px solid var(--line);
+    border-radius: var(--r);
+    background: var(--surface);
+    padding: 0.9rem;
+  }
+  .pw__summary { margin: 0; font-size: 0.9rem; }
+  .pw__stats {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    font-family: var(--mono);
+    font-size: 0.72rem;
+  }
+  .pw__stat {
+    border: 1px solid var(--line);
+    padding: 0.1rem 0.45rem;
+    color: var(--ink-dim);
+  }
+  .pw__warn {
+    margin: 0;
+    font-size: 0.83rem;
+    color: var(--warn);
+    padding-left: 0.6rem;
+    border-left: 2px solid var(--warn);
+  }
+  .pw__bad {
+    margin: 0;
+    font-size: 0.88rem;
+    color: var(--bad);
+    padding-left: 0.6rem;
+    border-left: 2px solid var(--bad);
+  }
+  .pw__take {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: center;
+    gap: 0.5rem 0.9rem;
+    padding-top: 0.75rem;
+    border-top: 1px solid var(--line);
+  }
+  .pw__size { font-size: 0.85rem; color: var(--ink-dim); }
+  .pw__size b { color: var(--ink); font-weight: 500; }
+  @media (max-width: 560px) {
+    .pw__take { grid-template-columns: minmax(0, 1fr); }
+    .pw__take .btn { justify-self: start; }
+  }
+</style>
+
+<script>
+  import { initDropzone } from '../../lib/ui/dropzone.ts';
+  import { formatBytes, stemOf, withExtension } from '../../lib/ui/files.ts';
+  import { downloadBlob, blobBytes } from '../../lib/ui/download.ts';
+  import { LIMITS, formatLimit } from '../../lib/ui/limits.ts';
+  import { pdfToWord, describeConversion, looksLikePdf } from '../../lib/pdf/toword.ts';
+  import type { ConvertResult } from '../../lib/pdf/toword.ts';
+  import { PasswordRequired } from '../../lib/pdf/pdfjs.ts';
+
+  const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+  const controls = $<HTMLElement>('pw-controls');
+  const out = $<HTMLElement>('pw-out');
+  const note = $<HTMLElement>('pw-note');
+  const runBtn = $<HTMLButtonElement>('pw-run');
+  const clearBtn = $<HTMLButtonElement>('pw-clear');
+  const optTables = $<HTMLInputElement>('pw-opt-tables');
+  const optBreaks = $<HTMLInputElement>('pw-opt-breaks');
+
+  let file: File | null = null;
+  let bytes: Uint8Array | null = null;
+  let password: string | undefined;
+
+  const el = (tag: string, cls?: string, text?: string): HTMLElement => {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  };
+
+  function reset(): void {
+    file = null;
+    bytes = null;
+    password = undefined;
+    controls.hidden = true;
+    note.textContent = '';
+    out.replaceChildren();
+  }
+
+  async function load(files: File[]): Promise<void> {
+    const picked = files[0];
+    if (!picked) return;
+    if (picked.size > LIMITS.pdf) {
+      note.textContent = `${picked.name} is over the ${formatLimit(LIMITS.pdf)} limit.`;
+      return;
+    }
+    const data = await blobBytes(picked);
+    if (!looksLikePdf(data)) {
+      note.textContent = `${picked.name} does not look like a PDF.`;
+      return;
+    }
+    file = picked;
+    bytes = data;
+    password = undefined;
+    note.textContent = '';
+    out.replaceChildren();
+    controls.hidden = false;
+  }
+
+  function render(result: ConvertResult): void {
+    out.replaceChildren();
+    const card = el('div', 'pw__result');
+
+    card.append(el('p', 'pw__summary', describeConversion(result)));
+
+    const stats = el('div', 'pw__stats');
+    const counts: [string, number][] = [
+      ['pages', result.pages.length],
+      ['headings', result.counts.heading ?? 0],
+      ['paragraphs', result.counts.paragraph ?? 0],
+      ['list items', result.counts.list ?? 0],
+      ['tables', result.counts.table ?? 0],
+    ];
+    for (const [label, count] of counts) {
+      if (!count) continue;
+      stats.append(el('span', 'pw__stat', `${count} ${label}`));
+    }
+    if (stats.childElementCount) card.append(stats);
+
+    for (const warning of result.warnings) {
+      card.append(el('p', 'pw__warn', warning));
+    }
+
+    if (result.empty) {
+      card.append(
+        el(
+          'p',
+          'pw__bad',
+          'There is nothing to put in a Word file. This is almost always a scan — a picture of a document rather than text.',
+        ),
+      );
+      out.append(card);
+      return;
+    }
+
+    const take = el('div', 'pw__take');
+    const size = el('span', 'pw__size');
+    size.append(document.createTextNode('Word document ready — '));
+    size.append(el('b', undefined, formatBytes(result.bytes.length)));
+    size.append(document.createTextNode('. Open it and edit it like any other.'));
+    take.append(size);
+
+    const button = el('button', 'btn btn--primary') as HTMLButtonElement;
+    button.type = 'button';
+    button.textContent = 'Download .docx';
+    button.addEventListener('click', () => {
+      const name = withExtension(stemOf(file?.name ?? 'document'), 'docx');
+      // A fresh buffer, so the Blob does not hold a view onto the conversion.
+      const copy = new Uint8Array(result.bytes);
+      downloadBlob(
+        new Blob([copy], {
+          type: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+        }),
+        name,
+      );
+    });
+    take.append(button);
+    card.append(take);
+
+    out.append(card);
+  }
+
+  async function run(): Promise<void> {
+    if (!bytes) return;
+    runBtn.disabled = true;
+    out.replaceChildren();
+    note.textContent = 'Reading the PDF…';
+
+    try {
+      const result = await pdfToWord(bytes, {
+        password,
+        tables: optTables.checked,
+        pageBreaks: optBreaks.checked,
+        onProgress: (page, total) => {
+          note.textContent = `Reading page ${page} of ${total}…`;
+        },
+      });
+      note.textContent = '';
+      render(result);
+    } catch (error) {
+      if (error instanceof PasswordRequired) {
+        const supplied = window.prompt(
+          error.wrong
+            ? 'That password was not accepted. Try again:'
+            : 'This PDF is password protected. Enter its password:',
+        );
+        if (supplied) {
+          password = supplied;
+          runBtn.disabled = false;
+          void run();
+          return;
+        }
+        note.textContent = 'This PDF is password protected, so its text cannot be read.';
+      } else {
+        note.textContent =
+          error instanceof Error ? error.message : 'This PDF could not be read.';
+      }
+    } finally {
+      runBtn.disabled = false;
+    }
+  }
+
+  initDropzone('pw-file', {
+    accept: ['application/pdf'],
+    extensions: ['pdf'],
+    paste: true,
+    maxBytes: LIMITS.pdf,
+    onTooLarge: (_rejected, message) => {
+      note.textContent = message;
+    },
+    onFiles: (files) => void load(files),
+  });
+
+  runBtn.addEventListener('click', () => void run());
+  clearBtn.addEventListener('click', reset);
+
+  // A different setting means a different document, so the old result goes.
+  for (const input of [optTables, optBreaks]) {
+    input.addEventListener('change', () => {
+      if (out.childElementCount) out.replaceChildren();
+    });
+  }
+</script>

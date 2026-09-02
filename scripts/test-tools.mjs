@@ -24,6 +24,13 @@ import {
 } from '../src/lib/exif/tags.ts';
 // describeReport is also exported by pdf/compress.ts; alias to keep both.
 import { readMetadata, summarise, describeReport as describeExif } from '../src/lib/exif/read.ts';
+import {
+  styleOf, toLines, toBlocks, lineText, proseSpans, tidyEmphasis, bodySize,
+  bodyMargin, markerOf, isListLine, isGap, cellStarts, findTableRuns,
+  looksScanned, unmappedRatio, looksMultiColumn,
+} from '../src/lib/pdf/textitems.ts';
+import { escapeXml, runXml, buildDocx } from '../src/lib/docx/ooxml.ts';
+import { looksLikePdf, describeConversion, CONVERT_CAVEATS } from '../src/lib/pdf/toword.ts';
 import { stripMetadata, imageDataOf, minimalOrientationTiff } from '../src/lib/exif/strip.ts';
 import {
   buildJpeg, buildPng, buildWebp, richExif, buildTiff, TYPE,
@@ -3368,6 +3375,432 @@ const sameBytes = (a, b) => {
     'and the reason is reported rather than swallowed',
   );
   eq(readMetadata(badThumb).thumbnail, null, 'so the report shows no preview');
+}
+
+/* -------------------------------------------------------------- pdf to word */
+
+/**
+ * Builds positioned glyph runs the way pdf.js reports them.
+ *
+ * The numbers below are the ones measured from a real conversion: 11pt body on
+ * a 15.2pt leading, headings at 15.5 and 20, a body margin of x=64 and list
+ * text restarting at x=100 behind a marker at x=82.
+ */
+function pdfItems(rows) {
+  const items = [];
+  for (const row of rows) {
+    let x = row.x ?? 64;
+    const size = row.size ?? 11;
+    for (const piece of row.parts) {
+      const text = typeof piece === 'string' ? piece : piece.text;
+      const font = typeof piece === 'string' ? 'Carlito-Regular-1' : (piece.font ?? 'Carlito-Regular-1');
+      // Half the point size per character is close enough to Carlito's average
+      // and keeps the fixtures readable.
+      const width = piece.width ?? text.length * size * 0.5;
+      items.push({ text, x, y: row.y, width, size, font, eol: false });
+      x += width + (piece.gap ?? 0);
+    }
+  }
+  return items;
+}
+
+{
+  // ---- weight and slope come from the font name ----
+  eq(styleOf('Carlito-Bold-8774').bold, true, 'a Bold face is recognised');
+  eq(styleOf('Carlito-Italic-773').italic, true, 'an Italic face is recognised');
+  eq(styleOf('Carlito-Regular-6171').bold, false, 'a Regular face is neither');
+  eq(styleOf('Carlito-Regular-6171').italic, false, 'nor italic');
+  // Subset prefixes are what a real PDF actually carries.
+  eq(styleOf('ABCDEF+Helvetica-BoldOblique').bold, true, 'a subset prefix does not hide the weight');
+  eq(styleOf('ABCDEF+Helvetica-BoldOblique').italic, true, 'or the slope');
+  eq(styleOf('Arial-Oblique').italic, true, 'Oblique counts as italic');
+  eq(styleOf('SourceSansPro-Semibold').bold, true, 'Semibold reads as bold, which is all Word has');
+  eq(styleOf('Courier-New').mono, true, 'a monospaced face is recognised');
+  eq(styleOf('Times-Roman').bold, false, '"Roman" is not mistaken for a weight');
+  eq(styleOf('').bold, false, 'an unnamed font claims nothing');
+
+  // ---- items to lines ----
+  const lines = toLines(pdfItems([
+    { y: 700, parts: ['Hello ', 'world'] },
+    { y: 685, parts: ['second line'] },
+  ]));
+  eq(lines.length, 2, 'two baselines make two lines');
+  eq(lineText(lines[0]), 'Hello world', 'runs on one baseline join into one line');
+  eq(lines[0].y, 700, 'and the line keeps its baseline');
+  ok(lines[0].right > lines[0].x, 'with a measured right edge');
+
+  // Reading order is down the page, and pdf.js does not promise sorted input.
+  const shuffled = toLines(pdfItems([
+    { y: 600, parts: ['third'] },
+    { y: 700, parts: ['first'] },
+    { y: 650, parts: ['second'] },
+  ]));
+  deep(shuffled.map(lineText), ['first', 'second', 'third'], 'lines come back in reading order');
+
+  // A gap the PDF left empty is still a word space.
+  const gapped = toLines(pdfItems([{ y: 700, parts: [{ text: 'two', gap: 3 }, 'words'] }]));
+  eq(lineText(gapped[0]), 'two words', 'a small gap becomes a space');
+
+  const glued = toLines(pdfItems([{ y: 700, parts: ['un', 'broken'] }]));
+  eq(lineText(glued[0]), 'unbroken', 'and no gap becomes nothing');
+
+  // ---- the body baseline everything else is measured against ----
+  const mixedSizes = toLines(pdfItems([
+    { y: 740, size: 20, parts: ['Title'] },
+    { y: 700, parts: ['a much longer line of ordinary body text here'] },
+    { y: 685, parts: ['and another line of ordinary body text'] },
+  ]));
+  eq(bodySize(mixedSizes), 11, 'the body size is the one most characters use, not the average');
+  eq(bodyMargin(mixedSizes), 64, 'and the margin is the commonest left edge');
+
+  // ---- markers ----
+  eq(markerOf('•'), 'bullet', 'a bullet is a bullet');
+  eq(markerOf('-'), 'bullet', 'so is a hyphen used as one');
+  eq(markerOf('1.'), 'number', 'a number with a stop is a marker');
+  eq(markerOf('(a)'), 'number', 'so is a parenthesised letter');
+  eq(markerOf('iv.'), 'number', 'and a roman numeral');
+  eq(markerOf('1996'), null, 'a bare year is not a marker');
+  eq(markerOf('word'), null, 'nor is a word');
+  eq(markerOf(''), null, 'nor is nothing');
+}
+
+{
+  // ---- paragraphs: which line breaks did the author mean? ----
+  // Three lines at wrap spacing, the first two reaching the right edge.
+  const wrapped = toBlocks(toLines(pdfItems([
+    { y: 700, parts: [{ text: 'first line of the paragraph running to the edge', width: 440 }] },
+    { y: 685, parts: [{ text: 'second line of the paragraph also running along', width: 445 }] },
+    { y: 670, parts: [{ text: 'and a short last line.', width: 120 }] },
+  ])));
+  eq(wrapped.length, 1, 'lines at wrap spacing are one paragraph');
+  ok(
+    /edge second line/.test(wrapped[0].spans.map((s) => s.text).join('')),
+    'joined with a space where the line broke',
+  );
+
+  // The same lines, but spaced far enough apart to be separate paragraphs.
+  const spaced = toBlocks(toLines(pdfItems([
+    { y: 700, parts: [{ text: 'first paragraph running right to the edge', width: 440 }] },
+    { y: 660, parts: [{ text: 'second paragraph running right to the edge', width: 440 }] },
+  ])));
+  eq(spaced.length, 2, 'lines spaced beyond the leading are separate paragraphs');
+
+  // A line that stops short of the column edge ended its paragraph, even at
+  // wrap spacing -- this is the test that distinguishes the two cases.
+  const shortFirst = toBlocks(toLines(pdfItems([
+    { y: 700, parts: [{ text: 'a short line', width: 90 }] },
+    { y: 685, parts: [{ text: 'a following line that runs all the way to the edge', width: 445 }] },
+  ])));
+  eq(shortFirst.length, 2, 'a line ending well short of the edge closes its paragraph');
+
+  // ---- headings ----
+  const headed = toBlocks(toLines(pdfItems([
+    { y: 740, size: 20, parts: ['Big Title'] },
+    { y: 700, size: 15.5, parts: ['Subheading'] },
+    { y: 660, parts: [{ text: 'body text that is long enough to establish the body size', width: 430 }] },
+    { y: 645, parts: [{ text: 'and a second line of that same body text for weight', width: 430 }] },
+  ])));
+  deep(
+    headed.map((b) => b.kind + (b.level ? b.level : '')),
+    ['heading1', 'heading2', 'paragraph'],
+    'size alone separates two heading levels from body text',
+  );
+
+  // A wholly bold short line is the other way people write a heading.
+  const boldHead = toBlocks(toLines(pdfItems([
+    { y: 700, parts: [{ text: 'Section Title', font: 'Carlito-Bold-1' }] },
+    { y: 680, parts: [{ text: 'body text long enough to be the dominant size on the page', width: 430 }] },
+    { y: 665, parts: [{ text: 'continuing that body text for a second full line here', width: 430 }] },
+  ])));
+  eq(boldHead[0].kind, 'heading', 'a short all-bold line is a heading');
+  eq(boldHead[0].level, 3, 'at the lowest level, since its size says nothing');
+
+  // A long bold line is emphasis, not a heading.
+  const boldParagraph = toBlocks(toLines(pdfItems([
+    { y: 700, parts: [{ text: 'This whole sentence is bold but it is far too long to be a heading and it ends in a stop.', font: 'Carlito-Bold-1', width: 440 }] },
+    { y: 685, parts: [{ text: 'and more body text follows it on the next line here', width: 430 }] },
+  ])));
+  eq(boldParagraph[0].kind, 'paragraph', 'a long bold line is emphasis, not a heading');
+}
+
+{
+  // ---- lists ----
+  const listed = toBlocks(toLines(pdfItems([
+    { y: 700, x: 82, parts: [{ text: '•', width: 5.5, gap: 12.5 }, 'First point'] },
+    { y: 680, x: 82, parts: [{ text: '•', width: 5.5, gap: 12.5 }, 'Second point'] },
+    { y: 660, x: 82, parts: [{ text: '1.', width: 8.4, gap: 9.6 }, 'Step one'] },
+    { y: 640, x: 82, parts: [{ text: '2.', width: 8.4, gap: 9.6 }, 'Step two'] },
+  ])));
+  eq(listed.length, 4, 'four list items');
+  deep(listed.map((b) => b.kind), ['list', 'list', 'list', 'list'], 'all recognised as list items');
+  deep(
+    listed.map((b) => b.marker),
+    ['bullet', 'bullet', 'number', 'number'],
+    'with the right marker kinds',
+  );
+  deep(
+    listed.map((b) => b.spans.map((s) => s.text).join('')),
+    ['First point', 'Second point', 'Step one', 'Step two'],
+    'and the marker glyph stripped from the text',
+  );
+
+  // The jump after the marker is what makes it a marker. Without it this is
+  // just a sentence that happens to start with a number.
+  const notAList = toBlocks(toLines(pdfItems([
+    { y: 700, parts: [{ text: '1.', width: 8.4, gap: 1 }, '5 million was the figure quoted'] },
+  ])));
+  eq(notAList[0].kind, 'paragraph', 'a number with no jump after it is not a list marker');
+
+  const dashSentence = toBlocks(toLines(pdfItems([
+    { y: 700, parts: [{ text: '-', width: 4, gap: 1 }, '30% year on year'] },
+  ])));
+  eq(dashSentence[0].kind, 'paragraph', 'nor is a hyphen used as a minus sign');
+
+  // isListLine is what keeps lists out of the table detector.
+  const bulletLine = toLines(pdfItems([
+    { y: 700, x: 82, parts: [{ text: '•', width: 5.5, gap: 12.5 }, 'a point'] },
+  ]))[0];
+  ok(isListLine(bulletLine), 'a bullet line is identified as one');
+  const plainLine = toLines(pdfItems([{ y: 700, parts: ['just prose here'] }]))[0];
+  ok(!isListLine(plainLine), 'and prose is not');
+}
+
+{
+  // ---- tables ----
+  // Three rows agreeing on three column positions.
+  const tableRows = [
+    { y: 461, x: 68, parts: [{ text: 'Region', width: 30.7, gap: 127.7 }, { text: 'Q1', width: 13, gap: 145.5 }, { text: 'Q2', width: 13 }] },
+    { y: 438, x: 68, parts: [{ text: 'North', width: 26.2, gap: 132.2 }, { text: '1240', width: 22.3, gap: 136.1 }, { text: '1580', width: 22.3 }] },
+    { y: 415, x: 68, parts: [{ text: 'South', width: 26.1, gap: 132.3 }, { text: '980', width: 16.7, gap: 141.7 }, { text: '1105', width: 22.3 }] },
+  ];
+  const tableLines = toLines(pdfItems(tableRows));
+  const starts = cellStarts(tableLines[0]);
+  eq(starts.length, 3, 'three cell starts are found on a row (' + starts.length + ')');
+  near(starts[1], 226.4, 1, 'the second column is where the PDF put it');
+
+  const runs = findTableRuns(tableLines);
+  eq(runs.length, 1, 'the three rows form one table run');
+  eq(runs[0].columns.length, 3, 'agreeing on three columns');
+
+  const blocks = toBlocks(tableLines);
+  eq(blocks.length, 1, 'and become a single table block');
+  eq(blocks[0].kind, 'table', 'of kind table');
+  eq(blocks[0].rows.length, 3, 'with three rows');
+  const cells = blocks[0].rows.map((row) => row.map((cell) => cell.map((s) => s.text).join('')));
+  deep(cells[0], ['Region', 'Q1', 'Q2'], 'the header row splits correctly');
+  deep(cells[1], ['North', '1240', '1580'], 'and so does a data row');
+
+  // One line with a wide gap is not a table.
+  const single = findTableRuns(toLines(pdfItems([tableRows[0]])));
+  eq(single.length, 0, 'a single line with wide gaps is not a table');
+
+  // Nor are two lines whose gaps do not line up.
+  const misaligned = findTableRuns(toLines(pdfItems([
+    { y: 700, parts: [{ text: 'left', width: 20, gap: 100 }, { text: 'right', width: 20 }] },
+    { y: 680, parts: [{ text: 'left', width: 20, gap: 220 }, { text: 'right', width: 20 }] },
+  ])));
+  eq(misaligned.length, 0, 'columns that do not agree between rows are not a table');
+}
+
+{
+  // ---- gaps, prose spans and emphasis tidying ----
+  const line = toLines(pdfItems([
+    { y: 700, parts: [{ text: 'left', width: 20, gap: 100 }, { text: 'right', width: 20 }] },
+  ]))[0];
+  ok(line.spans.some(isGap), 'a wide gap is kept as its own span');
+  eq(lineText(line), 'left right', 'but reads as a single space in prose');
+
+  const collapsed = proseSpans(line.spans);
+  ok(!collapsed.some(isGap), 'proseSpans removes the gap spans');
+  eq(collapsed.map((s) => s.text).join(''), 'left right', 'leaving one space behind');
+
+  // A PDF draws the space after a bold word in the bold font.
+  const emphasised = tidyEmphasis([
+    { text: 'Plain ', bold: false, italic: false, mono: false, size: 11, x: 0, width: 30 },
+    { text: 'bold ', bold: true, italic: false, mono: false, size: 11, x: 30, width: 20 },
+    { text: 'after', bold: false, italic: false, mono: false, size: 11, x: 50, width: 25 },
+  ]);
+  eq(emphasised[1].text, 'bold', 'a trailing space moves out of a bold run');
+  eq(emphasised[2].text, ' after', 'and onto the run after it');
+
+  const leadingSpace = tidyEmphasis([
+    { text: 'Plain', bold: false, italic: false, mono: false, size: 11, x: 0, width: 30 },
+    { text: ' italic', bold: false, italic: true, mono: false, size: 11, x: 30, width: 20 },
+  ]);
+  eq(leadingSpace[0].text, 'Plain ', 'a leading space moves out of an italic run');
+  eq(leadingSpace[1].text, 'italic', 'leaving the emphasis on the word alone');
+}
+
+{
+  // ---- the honesty checks ----
+  const textItems = pdfItems([{ y: 700, parts: ['ordinary readable text on the page'] }]);
+  ok(!looksScanned(textItems, 0), 'a page with text is not a scan');
+  ok(!looksScanned(textItems, 3), 'even when it also holds images');
+  ok(looksScanned([], 1), 'a page with an image and no text is a scan');
+  ok(!looksScanned([], 0), 'an empty page with no image is not called a scan');
+
+  eq(unmappedRatio(textItems), 0, 'readable text has no unmapped glyphs');
+  const garbled = [{ text: String.fromCharCode(0xe000), x: 0, y: 0, width: 10, size: 11, font: 'X', eol: false }];
+  eq(unmappedRatio(garbled), 1, 'private-use glyphs are wholly unmapped');
+  const half = [{ text: 'a' + String.fromCharCode(0xe000), x: 0, y: 0, width: 10, size: 11, font: 'X', eol: false }];
+  near(unmappedRatio(half), 0.5, 0.01, 'and a mixture is reported as a proportion');
+  eq(unmappedRatio([]), 0, 'nothing is not garbled');
+
+  // Two columns: lines on the left and lines on the right, none crossing.
+  const twoColumn = [];
+  for (let i = 0; i < 8; i++) {
+    twoColumn.push({ y: 700 - i * 15, x: 60, parts: [{ text: 'left column line', width: 180 }] });
+    twoColumn.push({ y: 700 - i * 15, x: 320, parts: [{ text: 'right column line', width: 180 }] });
+  }
+  ok(
+    looksMultiColumn(toLines(pdfItems(twoColumn)), 595),
+    'columns sharing baselines are detected, which is the case that interleaves text',
+  );
+
+  // The other shape: each column has its own baselines.
+  const staggered = [];
+  for (let i = 0; i < 8; i++) {
+    staggered.push({ y: 700 - i * 15, x: 60, parts: [{ text: 'left column line', width: 180 }] });
+    staggered.push({ y: 694 - i * 15, x: 320, parts: [{ text: 'right column line', width: 180 }] });
+  }
+  ok(looksMultiColumn(toLines(pdfItems(staggered)), 595), 'and so are columns on their own baselines');
+
+  const oneColumn = [];
+  for (let i = 0; i < 16; i++) {
+    oneColumn.push({ y: 700 - i * 15, parts: [{ text: 'a full width line of body text', width: 440 }] });
+  }
+  ok(!looksMultiColumn(toLines(pdfItems(oneColumn)), 595), 'a single column is not');
+  ok(!looksMultiColumn(toLines(pdfItems(oneColumn.slice(0, 3))), 595), 'and too few lines to judge is not');
+}
+
+{
+  // ---- the .docx writer ----
+  eq(escapeXml('a & b'), 'a &amp; b', 'an ampersand is escaped');
+  eq(escapeXml('<tag>'), '&lt;tag&gt;', 'angle brackets are escaped');
+  eq(escapeXml('say "it"'), 'say &quot;it&quot;', 'quotes are escaped');
+  // An escaped control character is still illegal in XML 1.0, so it must go.
+  eq(escapeXml('a' + String.fromCharCode(0) + 'bc'), 'abc', 'control characters are dropped, not encoded');
+  const legal = 'keep' + String.fromCharCode(9) + 'tab' + String.fromCharCode(10) + 'end';
+  eq(escapeXml(legal), legal, 'but tab and newline are legal and kept');
+
+  const span = (text, extra = {}) => ({
+    text, bold: false, italic: false, mono: false, size: 11, x: 0, width: 20, ...extra,
+  });
+
+  const bold = runXml(span('x', { bold: true }));
+  ok(/<w:rPr><w:b\/>/.test(bold), 'a bold run carries w:b');
+  ok(/xml:space="preserve"/.test(bold), 'and preserves its whitespace, or Word eats the spaces');
+  const mono = runXml(span('x', { mono: true, bold: true }));
+  ok(
+    mono.indexOf('<w:rFonts') < mono.indexOf('<w:b/>'),
+    'rFonts precedes w:b, as the schema requires',
+  );
+  ok(runXml(span('x')).indexOf('<w:sz w:val="22"/>') > 0, '11pt is written as 22 half-points');
+
+  const { files } = buildDocx([
+    { kind: 'heading', level: 1, spans: [span('Title')] },
+    { kind: 'paragraph', spans: [span('Body')] },
+    { kind: 'list', marker: 'bullet', spans: [span('Point')] },
+    { kind: 'list', marker: 'number', spans: [span('Step')] },
+    { kind: 'table', rows: [[[span('a')], [span('b')]]] },
+    { kind: 'pagebreak' },
+  ]);
+
+  const paths = Object.keys(files).sort();
+  deep(
+    paths,
+    [
+      '[Content_Types].xml',
+      '_rels/.rels',
+      'word/_rels/document.xml.rels',
+      'word/document.xml',
+      'word/numbering.xml',
+      'word/styles.xml',
+    ],
+    'the package holds exactly the parts Word needs',
+  );
+
+  const document = new TextDecoder().decode(files['word/document.xml']);
+  ok(/<w:pStyle w:val="Heading1"\/>/.test(document), 'a heading references its style');
+  ok(/<w:numId w:val="1"\/>/.test(document), 'a bullet references the bullet numbering');
+  ok(/<w:numId w:val="2"\/>/.test(document), 'a numbered item references the decimal numbering');
+  ok(/<w:tbl>/.test(document), 'a table is written as a table');
+  ok(/<w:br w:type="page"\/>/.test(document), 'a page break is written as one');
+  ok(/<w:sectPr>/.test(document), 'the body ends with a section, or the page setup is undefined');
+  ok(/<w:tblLayout w:type="fixed"\/>/.test(document), 'the table layout is fixed, so Word keeps the columns');
+  // Every cell needs a paragraph or Word calls the file corrupt.
+  eq((document.match(/<w:tc>/g) ?? []).length, 2, 'the one-row table has two cells');
+  ok(!/<w:tc><w:tcPr[^>]*\/><\/w:tc>/.test(document), 'and no cell is left without a paragraph');
+
+  const numbering = new TextDecoder().decode(files['word/numbering.xml']);
+  ok(/w:numFmt w:val="bullet"/.test(numbering), 'the numbering part defines bullets');
+  ok(/w:numFmt w:val="decimal"/.test(numbering), 'and decimals, without which lists lose their markers');
+
+  const styles = new TextDecoder().decode(files['word/styles.xml']);
+  for (const level of [1, 2, 3]) {
+    ok(
+      new RegExp('w:styleId="Heading' + level + '"').test(styles),
+      'Heading' + level + ' is defined, or the heading has no style to point at',
+    );
+  }
+
+  // An empty document must still be a valid document.
+  const emptyDoc = buildDocx([]);
+  const emptyXml = new TextDecoder().decode(emptyDoc.files['word/document.xml']);
+  ok(/<w:body><w:sectPr>/.test(emptyXml), 'a document with no blocks is still well formed');
+
+  const withImage = buildDocx([
+    { kind: 'image', image: { data: new Uint8Array([1, 2, 3]), mime: 'image/png', width: 100, height: 50 } },
+  ]);
+  ok('word/media/image1.png' in withImage.files, 'an image is packaged as a media part');
+  const imageRels = new TextDecoder().decode(withImage.files['word/_rels/document.xml.rels']);
+  const imageDoc = new TextDecoder().decode(withImage.files['word/document.xml']);
+  const relId = /r:embed="(rId\d+)"/.exec(imageDoc)?.[1];
+  ok(!!relId, 'the drawing references a relationship');
+  ok(
+    new RegExp('Id="' + relId + '"').test(imageRels),
+    'and that relationship exists — a mismatch is a red X where the picture should be',
+  );
+  ok(/Extension="png"/.test(new TextDecoder().decode(withImage.files['[Content_Types].xml'])),
+    'with its content type declared');
+  // 100pt at 12700 EMU per point.
+  ok(/cx="1270000"/.test(imageDoc), 'and its size converted to EMU');
+}
+
+{
+  // ---- the entry point's guards and summary ----
+  ok(looksLikePdf(new TextEncoder().encode('%PDF-1.7\n...')), 'a PDF is recognised by its header');
+  const zipHeader = new Uint8Array([0x50, 0x4b, 0x03, 0x04, 0x14, 0x00]);
+  ok(!looksLikePdf(zipHeader), 'a zip -- a .docx, say -- is not a PDF');
+  ok(!looksLikePdf(new Uint8Array(0)), 'and nothing is not a PDF');
+
+  const report = (counts, pages = 1, empty = false) => ({
+    bytes: new Uint8Array(0), pages: Array.from({ length: pages }, (_, i) => ({
+      page: i + 1, lines: 1, blocks: 1, scanned: false, multiColumn: false, unreadableRatio: 0,
+    })), counts, warnings: [], empty,
+  });
+
+  ok(
+    /No text could be extracted/.test(describeConversion(report({}, 1, true))),
+    'an empty result says so plainly',
+  );
+  const described = describeConversion(report({ paragraph: 4, list: 6, heading: 2, table: 1 }, 3));
+  ok(/4 paragraphs/.test(described), 'the summary counts paragraphs: ' + described);
+  ok(/6 list items/.test(described), 'and list items separately, matching the figures beside it');
+  ok(/2 headings/.test(described), 'and headings');
+  ok(/1 table/.test(described), 'and tables');
+  ok(/3 pages/.test(described), 'and the pages they came from');
+  ok(/1 paragraph\b/.test(describeConversion(report({ paragraph: 1 }))), 'singular reads correctly');
+
+  ok(CONVERT_CAVEATS.length >= 4, 'the caveats are stated rather than discovered');
+  ok(
+    CONVERT_CAVEATS.some((caveat) => /OCR/.test(caveat)),
+    'including that a scan needs OCR',
+  );
+  ok(
+    CONVERT_CAVEATS.some((caveat) => /inferred/.test(caveat)),
+    'and that the structure is inferred rather than read',
+  );
 }
 
 console.log(`\n${pass} passed, ${fail} failed`);

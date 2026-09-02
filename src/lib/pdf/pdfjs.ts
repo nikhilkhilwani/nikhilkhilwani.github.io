@@ -16,7 +16,10 @@ type PdfjsModule = typeof import('pdfjs-dist');
 
 let cached: Promise<PdfjsModule> | null = null;
 
-const base = (import.meta.env.BASE_URL || '/').replace(/\/?$/, '/');
+// import.meta.env exists only under Vite. Node's test runner imports this
+// module for the pure helpers beside it, where reading BASE_URL off an
+// undefined object would throw before any test ran.
+const base = (import.meta.env?.BASE_URL || '/').replace(/\/?$/, '/');
 
 export const PDFJS_ASSETS = {
   cMapUrl: `${base}pdfjs/cmaps/`,
