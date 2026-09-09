@@ -441,7 +441,15 @@ export function parseBlocks(html: string): Block[] {
         } else if (tag.name === 'p') {
           if (tag.closing) {
             if (!cell) flush();
-          } else if (!cell) {
+          } else if (cell) {
+            // A table cell holds paragraphs, but a Cell is ONE run list, so a
+            // second paragraph fuses onto the end of the first unless a line
+            // break is put between them. On a real court filing this turned
+            // "Place: Ahmedabad" and "Date: 09.08.2026" into the single line
+            // "Place: AhmedabadDate: 09.08.2026". A soft break does exactly
+            // this job, and the layout pass already honours a newline.
+            if (cell.length) pushText('\n');
+          } else {
             // A <p> opening directly inside an <li> is that item's own
             // paragraph. The generic path below would flush the empty listItem
             // and replace it with a plain paragraph, throwing the list marker

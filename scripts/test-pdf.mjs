@@ -2316,5 +2316,124 @@ const plain = await makePlain();
   ok(/than the worst one\./.test(text), 'and the ordinary paragraph ends where it should');
 }
 
+/* ------------------- 19. word to pdf: two paragraphs in one cell */
+
+/**
+ * A table cell holds paragraphs; a Cell in the block model is ONE run list.
+ * Without a line break between them the second paragraph fuses onto the end
+ * of the first, which on a real court filing turned
+ *
+ *     Place: Ahmedabad          into     Place: AhmedabadDate: 09.08.2026
+ *     Date: 09.08.2026
+ *
+ * The fixture is synthetic on purpose: the document that exposed this was a
+ * live legal filing, and its names and case number do not belong in a repo.
+ */
+{
+  const WNS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+  const para = (text) =>
+    '<w:p><w:pPr><w:jc w:val="left"/></w:pPr><w:r><w:t xml:space="preserve">' + text + '</w:t></w:r></w:p>';
+  const cell = (paragraphs) =>
+    '<w:tc><w:tcPr><w:tcW w:w="4500" w:type="dxa"/></w:tcPr>' + paragraphs.map(para).join('') + '</w:tc>';
+
+  const source = zipSync({
+    '[Content_Types].xml': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+        '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+        '<Default Extension="xml" ContentType="application/xml"/>' +
+        '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+        '</Types>',
+    ),
+    '_rels/.rels': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+        '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+        '</Relationships>',
+    ),
+    'word/document.xml': strToU8(
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+        '<w:document ' + WNS + '><w:body>' +
+        '<w:tbl><w:tr>' +
+        cell(['Place: Springfield', 'Date: 01.02.2026']) +
+        cell(['-------------------', 'FOR THE APPLICANT']) +
+        '</w:tr></w:tbl>' +
+        para('A closing line beneath the table.') +
+        '</w:body></w:document>',
+    ),
+  });
+
+  const built = await docxToPdf(source);
+  const cellPdf = built.bytes ?? built;
+  const cellDoc = await pdfjs.getDocument({
+    data: new Uint8Array(cellPdf),
+    isEvalSupported: false,
+  }).promise;
+  const cellPage = await cellDoc.getPage(1);
+  const runs = (await cellPage.getTextContent()).items.filter(
+    (item) => typeof item.str === 'string' && item.str.trim() && item.transform,
+  );
+
+  // The defect was ONE run holding both paragraphs, so that is what is
+  // tested. A flattened string cannot see it: joining the runs reintroduces
+  // exactly the fusion being looked for.
+  ok(
+    !runs.some((item) => /Springfield\s*Date/.test(item.str)),
+    'no single run holds both paragraphs of a cell',
+  );
+  ok(
+    !runs.some((item) => /-\s*FOR THE APPLICANT/.test(item.str)),
+    'nor both paragraphs of the second cell',
+  );
+
+  /** Runs in one x band, read top to bottom. */
+  const band = (from, to) =>
+    runs
+      .filter((item) => item.transform[4] >= from && item.transform[4] < to)
+      .sort((a, b) => b.transform[5] - a.transform[5])
+      .map((item) => item.str.trim());
+
+  const middle = 595.28 / 2;
+  const leftCell = band(0, middle).filter((text) => /Springfield|^Date/.test(text));
+  const rightCell = band(middle, 600).filter((text) => /^-+$|APPLICANT/.test(text));
+  deep(leftCell, ['Place: Springfield', 'Date: 01.02.2026'], 'the left cell reads as two lines');
+  deep(rightCell, ['-------------------', 'FOR THE APPLICANT'], 'and the right cell likewise');
+
+  // Stacked, not merely two runs sharing a baseline.
+  const baselines = [
+    ...new Set(
+      runs
+        .filter((item) => /Springfield|^Date/.test(item.str.trim()))
+        .map((item) => Math.round(item.transform[5] * 10) / 10),
+    ),
+  ];
+  eq(baselines.length, 2, 'on two distinct baselines');
+  ok(baselines[0] > baselines[1], 'in document order, Place above Date');
+
+  // The two cells sit side by side, and the row grew to hold two lines.
+  const place = runs.find((item) => /Springfield/.test(item.str));
+  const rule = runs.find((item) => /^-+$/.test(item.str.trim()));
+  ok(!!place && !!rule, 'both cells are drawn');
+  if (place && rule) {
+    ok(rule.transform[4] > place.transform[4] + 100, 'in separate columns');
+    eq(
+      Math.round(place.transform[5] * 10),
+      Math.round(rule.transform[5] * 10),
+      'with their first lines on the same baseline',
+    );
+  }
+
+  // Whatever follows the table must still be below it, not overlapped.
+  const closing = runs.find((item) => /A closing line/.test(item.str));
+  ok(!!closing, 'the paragraph after the table survives');
+  if (closing && place) {
+    const dateRun = runs.find((item) => /^Date:/.test(item.str.trim()));
+    ok(
+      !!dateRun && closing.transform[5] < dateRun.transform[5],
+      'and sits below the taller row, so the row grew to fit two lines',
+    );
+  }
+}
+
 console.log(`\n${pass} passed, ${fail} failed`);
 process.exit(fail ? 1 : 0);
